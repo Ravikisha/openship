@@ -645,10 +645,10 @@ describe("getBuildCommand", () => {
     ).toBe("pnpm build");
   });
 
-  it("uses bun runner directly (not npm run)", () => {
+  it("uses 'bun run build' for bun (not 'bun build', which is the bundler)", () => {
     expect(
       getBuildCommand("bun", "nextjs", { scripts: { build: "next build" } }),
-    ).toBe("bun build");
+    ).toBe("bun run build");
   });
 
   it("uses 'npm run build' for npm package manager", () => {

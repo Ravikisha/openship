@@ -89,6 +89,108 @@ export function createServiceRepo(db: Database) {
       await db.delete(service).where(eq(service.id, id));
     },
 
+    /** List only the rows of one kind under a project. */
+    async listByProjectKind(projectId: string, kind: "compose" | "monorepo") {
+      return db.query.service.findMany({
+        where: and(eq(service.projectId, projectId), eq(service.kind, kind)),
+        orderBy: [asc(service.sortOrder), asc(service.name)],
+      });
+    },
+
+    /**
+     * Sync monorepo sub-apps for a project. Mirrors `syncFromCompose` but for
+     * `kind="monorepo"` rows — creates new, updates existing, removes stale
+     * (matched by `name`, which is the sub-app's stable identifier). Leaves
+     * compose rows in the same project untouched.
+     */
+    async syncMonorepoApps(
+      projectId: string,
+      apps: {
+        name: string;
+        rootDirectory: string;
+        framework?: string | null;
+        packageManager?: string | null;
+        buildImage?: string | null;
+        installCommand?: string | null;
+        buildCommand?: string | null;
+        startCommand?: string | null;
+        outputDirectory?: string | null;
+        port?: number | string | null;
+        enabled?: boolean;
+        exposed?: boolean;
+        exposedPort?: string | null;
+        domain?: string | null;
+        customDomain?: string | null;
+        domainType?: string | null;
+        environment?: Record<string, string>;
+      }[],
+    ) {
+      const existing = await this.listByProjectKind(projectId, "monorepo");
+      const existingByName = new Map(existing.map((s) => [s.name, s]));
+      const incomingNames = new Set(apps.map((a) => a.name));
+
+      const results: Service[] = [];
+      for (let i = 0; i < apps.length; i++) {
+        const app = apps[i];
+        const ex = existingByName.get(app.name);
+
+        const routing = normalizeRoutingFields({
+          exposed: app.exposed ?? ex?.exposed ?? true,
+          exposedPort: app.exposedPort ?? ex?.exposedPort ?? (app.port != null ? String(app.port) : null),
+          domain: app.domain ?? ex?.domain,
+          customDomain: app.customDomain ?? ex?.customDomain,
+          domainType: app.domainType ?? ex?.domainType,
+        });
+
+        const fields = {
+          kind: "monorepo" as const,
+          name: app.name,
+          rootDirectory: app.rootDirectory,
+          framework: app.framework ?? null,
+          packageManager: app.packageManager ?? null,
+          buildImage: app.buildImage ?? null,
+          installCommand: app.installCommand ?? null,
+          buildCommand: app.buildCommand ?? null,
+          startCommand: app.startCommand ?? null,
+          outputDirectory: app.outputDirectory ?? null,
+          environment: app.environment ?? {},
+          ...routing,
+          enabled: app.enabled ?? true,
+          sortOrder: i,
+        };
+
+        if (ex) {
+          await this.update(ex.id, fields);
+          results.push({ ...ex, ...fields, updatedAt: new Date() } as Service);
+        } else {
+          const created = await this.create({
+            projectId,
+            ...fields,
+            // Compose-only fields stay null on monorepo rows.
+            image: null,
+            build: null,
+            dockerfile: null,
+            ports: [],
+            dependsOn: [],
+            volumes: [],
+            command: null,
+            restart: "unless-stopped",
+          });
+          results.push(created);
+        }
+      }
+
+      // Remove monorepo rows that aren't in the incoming list (compose rows
+      // are filtered out by listByProjectKind, so they survive).
+      for (const ex of existing) {
+        if (!incomingNames.has(ex.name)) {
+          await this.remove(ex.id);
+        }
+      }
+
+      return results;
+    },
+
     /** Sync services from a parsed compose file. Creates new, updates existing, removes stale. */
     async syncFromCompose(
       projectId: string,

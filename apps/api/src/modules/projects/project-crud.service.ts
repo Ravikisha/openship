@@ -142,9 +142,43 @@ function buildProductionProjectInput(
     port: data.port ?? 3000,
     hasServer: data.hasServer ?? true,
     hasBuild: data.hasBuild ?? true,
+    workspaceInstallCommand:
+      data.projectType === "monorepo"
+        ? data.monorepoWorkspace?.installCommand ?? null
+        : null,
     rollbackWindow:
       data.rollbackWindow !== undefined ? normalizeRollbackWindow(data.rollbackWindow) : null,
   };
+}
+
+async function persistMonorepoApps(
+  projectId: string,
+  data: TCreateProjectBody,
+): Promise<void> {
+  if (data.projectType !== "monorepo" || !data.monorepoApps?.length) return;
+
+  await repos.service.syncMonorepoApps(
+    projectId,
+    data.monorepoApps.map((app) => ({
+      name: app.name,
+      rootDirectory: app.rootDirectory,
+      framework: app.framework ?? null,
+      packageManager: app.packageManager ?? null,
+      buildImage: app.buildImage ?? null,
+      installCommand: app.installCommand ?? null,
+      buildCommand: app.buildCommand ?? null,
+      startCommand: app.startCommand ?? null,
+      outputDirectory: app.outputDirectory ?? null,
+      port: app.port ?? null,
+      enabled: app.enabled ?? true,
+      exposed: app.exposed ?? true,
+      exposedPort: app.port != null ? String(app.port) : null,
+      domain: app.domain ?? null,
+      customDomain: app.customDomain ?? null,
+      domainType: app.domainType ?? "free",
+      environment: app.environment ?? {},
+    })),
+  );
 }
 
 async function createProductionProject(userId: string, data: TCreateProjectBody, slug: string) {
@@ -161,6 +195,7 @@ async function createProductionProject(userId: string, data: TCreateProjectBody,
       buildProductionProjectInput(userId, app.id, data, slug, routing),
     );
     await persistProjectRouteState(created.id, routing.publicEndpoints);
+    await persistMonorepoApps(created.id, data);
     return created;
   } catch (err) {
     if (appCreated) {
@@ -273,6 +308,9 @@ export async function ensureProject(userId: string, data: EnsureProjectBody) {
       }
     }
     if (data.hasBuild !== undefined) update.hasBuild = data.hasBuild;
+    if (data.projectType === "monorepo" && data.monorepoWorkspace !== undefined) {
+      update.workspaceInstallCommand = data.monorepoWorkspace.installCommand ?? null;
+    }
     if (data.slug !== undefined && data.slug !== project.slug) {
       const existingProject = await repos.project.findBySlug(userId, data.slug);
       if (existingProject && existingProject.id !== project.id) {
@@ -323,6 +361,10 @@ export async function ensureProject(userId: string, data: EnsureProjectBody) {
     ) {
       await repos.projectApp.update(project.appId, { slug: update.slug });
     }
+
+    // Re-sync monorepo sub-apps if the request carries them. The sync method
+    // is idempotent — adds new rows, updates existing, removes stale ones.
+    await persistMonorepoApps(project.id, data);
   }
 
   return { success: true, project_id: project.id, created };
@@ -330,15 +372,41 @@ export async function ensureProject(userId: string, data: EnsureProjectBody) {
 
 // ─── List projects ───────────────────────────────────────────────────────────
 
+/**
+ * List the user's projects, one display row per project app.
+ *
+ * Drives off `project` directly (not `project_app`) so the list and the detail
+ * endpoint (`getProject`) agree on what's visible. The previous implementation
+ * filtered apps first, which hid projects whose `project_app` row had been
+ * soft-deleted while the project itself was still alive — a state the detail
+ * endpoint happily returned, leaving the project reachable by URL but absent
+ * from every listing.
+ */
 export async function listProjects(userId: string, opts?: { page?: number; perPage?: number }) {
-  const apps = await repos.projectApp.listByUser(userId, opts);
-  const rows = (
-    await Promise.all(
-      apps.rows.map(async (app) => selectDisplayProject(await repos.project.listByApp(app.id))),
-    )
-  ).filter((project): project is Project => !!project);
+  const page = opts?.page ?? 1;
+  const perPage = opts?.perPage ?? 20;
 
-  return { ...apps, rows };
+  // Fetch all alive projects for the user. The per-user cap is small enough
+  // (SYSTEM.PROJECTS.MAX_PER_USER) that loading them in one query is fine; we
+  // group/paginate in memory.
+  const { rows: projects } = await repos.project.listByUser(userId, { page: 1, perPage: 1000 });
+
+  const byApp = new Map<string, Project[]>();
+  for (const p of projects) {
+    const list = byApp.get(p.appId) ?? [];
+    list.push(p);
+    byApp.set(p.appId, list);
+  }
+
+  const displays = Array.from(byApp.values())
+    .map(selectDisplayProject)
+    .filter((p): p is Project => !!p)
+    .sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0));
+
+  const start = (page - 1) * perPage;
+  const rows = displays.slice(start, start + perPage);
+
+  return { rows, total: displays.length, page, perPage };
 }
 
 // ─── Get single project ──────────────────────────────────────────────────────

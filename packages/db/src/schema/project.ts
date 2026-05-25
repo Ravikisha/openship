@@ -123,6 +123,12 @@ export const project = pgTable(
     /** Whether the project needs a build step (false = deploy source files directly) */
     hasBuild: boolean("has_build").notNull().default(true),
 
+    /**
+     * Shared install command run once at the repo root before any per-app build.
+     * Only used when projectType === "monorepo" (e.g. "pnpm install -w").
+     */
+    workspaceInstallCommand: text("workspace_install_command"),
+
     /* ── Resources (VM-native format) ───────────────────────────────────── */
     /** JSON: { cpuCores, memoryMb } */
     resources: jsonb("resources"),

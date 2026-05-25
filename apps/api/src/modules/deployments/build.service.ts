@@ -65,6 +65,7 @@ import {
   resolveProjectServicePreflightServices,
   shouldUseProjectServicePipeline,
 } from "./compose";
+import { applyMonorepoOverrides, resolveMonorepoPlan, persistMonorepoDeployMetadata } from "./monorepo";
 import * as settingsService from "../settings/settings.service";
 import type { ComposeService } from "../../lib/compose-parser";
 import {
@@ -635,6 +636,16 @@ export async function requestBuildAccess(userId: string, input: BuildAccessInput
     snapshot.deployTarget = deployTarget;
   }
   if (serverId) {
+    // Refuse to deploy to a server that doesn't host apps. Mail-only servers
+    // run iRedMail and are provisioned via the mail-server install pipeline,
+    // not the standard Docker / bare-runtime flow. Servers that run BOTH
+    // apps + mail (runsApps && runsMail) accept app deploys normally.
+    const targetServer = await repos.server.get(serverId);
+    if (targetServer && !targetServer.runsApps) {
+      throw new Error(
+        `Server "${targetServer.name ?? targetServer.sshHost}" is configured as a mail-only server and cannot be used as an app deploy target. Enable "Runs apps" on this server, or select a different one.`,
+      );
+    }
     snapshot.serverId = serverId;
   }
   if (runtimeMode) {
@@ -1128,17 +1139,38 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
       effectiveTarget,
     });
 
+    // ── Monorepo override ─────────────────────────────────────────────
+    // When the project has enabled monorepo sub-app rows, we deploy the
+    // primary (lowest sortOrder) one through the single-app pipeline with
+    // its commands + the shared workspace install. The remaining sub-apps
+    // are persisted but skipped this turn; the next iteration will add
+    // multi-workload fan-out.
+    const monorepoPlan = await resolveMonorepoPlan(project);
+    const effectiveSnapshot = monorepoPlan
+      ? applyMonorepoOverrides(snapshot, monorepoPlan)
+      : snapshot;
+    if (monorepoPlan) {
+      logger.log(
+        `Monorepo deploy — primary app: ${monorepoPlan.primaryAppName} (root: ${monorepoPlan.rootDirectory}). ` +
+          (monorepoPlan.pendingAppNames.length > 0
+            ? `Pending apps queued for future fan-out: ${monorepoPlan.pendingAppNames.join(", ")}.\n`
+            : "\n"),
+        "info",
+      );
+      await persistMonorepoDeployMetadata(project.id, monorepoPlan);
+    }
+
     const buildConfig = createBuildConfig({
       project,
       dep,
-      snapshot,
+      snapshot: effectiveSnapshot,
       sessionId: buildSessionId,
       envVars: buildEnv.envVars,
       resources: buildResources,
       gitToken: gitToken ?? undefined,
     });
 
-    const useServicePipeline = (await resolveServicePipelineMode(project, snapshot)).useServicePipeline;
+    const useServicePipeline = (await resolveServicePipelineMode(project, effectiveSnapshot)).useServicePipeline;
 
     if (useServicePipeline && isMultiServiceRuntime(runtime)) {
       if (snapshot.composeServices?.length) {
@@ -1171,7 +1203,7 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
       return;
     }
 
-    if (!snapshot.hasBuild) {
+    if (!effectiveSnapshot.hasBuild) {
       logger.step(
         "build",
         "completed",
@@ -1211,7 +1243,7 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
       ctx,
       project,
       dep,
-      snapshot,
+      snapshot: effectiveSnapshot,
       buildSessionId,
       runtime,
       routing,
@@ -1226,7 +1258,7 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
       logger,
     };
 
-    if (!snapshot.hasServer && runtime instanceof CloudRuntime) {
+    if (!effectiveSnapshot.hasServer && runtime instanceof CloudRuntime) {
       await executeStaticEdgeDeploy(phase, runtime);
     } else {
       await executeServerDeploy(phase);

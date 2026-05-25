@@ -11,7 +11,7 @@ const AUTHORS: Record<string, Author> = {
     name: "Openship Team",
     role: "Core Team",
     bio: "Building open-source deployment infrastructure for everyone.",
-    github: "openshiporg",
+    github: "oblien",
   },
 };
 

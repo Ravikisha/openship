@@ -4,6 +4,44 @@ import type { PrepareSingleAppCandidate } from "@/lib/api/deploy";
 import { getBuildImage, STACKS, type ProjectType, type BuildStrategy, type DeployTarget, type RuntimeMode, type StackId } from "@repo/core";
 import type { BuildLog } from "@/utils/deploymentPhaseDetector";
 
+// ─── Monorepo sub-app ────────────────────────────────────────────────────────
+
+/**
+ * One deployable sub-app inside a monorepo. Mirrors the single-app form fields
+ * (rootDirectory, install/build/start commands, port) plus per-app routing/env
+ * scoping. Multiple of these live under one openship project, all sharing the
+ * monorepoWorkspace install at the repo root.
+ */
+export interface MonorepoAppConfig {
+  /** Stable identifier (defaults to rootDirectory). */
+  id: string;
+  /** Display name (last segment of rootDirectory, or package.json name). */
+  name: string;
+  /** Whether this sub-app is included in the next deploy. */
+  enabled: boolean;
+  framework: FrameworkId;
+  detectedFramework: FrameworkId | null;
+  packageManager: string;
+  buildImage: string;
+  rootDirectory: string;
+  installCommand: string;
+  buildCommand: string;
+  startCommand: string;
+  outputDirectory: string;
+  productionPaths: string[];
+  port: string;
+  hasServer: boolean;
+  hasBuild: boolean;
+  envVars: EnvironmentVariable[];
+  publicEndpoints: PublicEndpoint[];
+}
+
+export interface MonorepoWorkspaceConfig {
+  packageManager: string;
+  /** Shared install command run once at the repo root before per-app builds. */
+  installCommand: string;
+}
+
 const GENERIC_MULTI_BUILD_IMAGE = "ubuntu:22.04";
 const NON_APP_SINGLE_FLOW_STACKS = new Set<FrameworkId>(["docker", "docker-compose", "unknown"]);
 const NODE_BUILD_PACKAGE_MANAGERS = new Set(["npm", "pnpm", "yarn"]);
@@ -149,6 +187,10 @@ export interface DeploymentConfig {
     options: DeploymentOptions;
   };
   modeSnapshots?: DeploymentModeSnapshots;
+  /** Sub-apps discovered inside a monorepo. Only populated when projectType === "monorepo". */
+  monorepoApps?: MonorepoAppConfig[];
+  /** Shared workspace metadata (package manager + root install) for monorepo deploys. */
+  monorepoWorkspace?: MonorepoWorkspaceConfig;
   /** Local-only flag so env imports don't overwrite a user-edited runtime port. */
   productionPortTouched: boolean;
   /** Last runtime port auto-applied from env detection in this deploy flow. */

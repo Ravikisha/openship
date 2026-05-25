@@ -387,6 +387,7 @@ export function useDeploymentBuild(
 
     try {
       const isServiceDeployment = usesServiceDeployment(config);
+      const isMonorepoDeployment = config.projectType === "monorepo";
 
       // Step 1: Ensure project exists
       const projectData = await projectsApi.ensure({
@@ -408,13 +409,37 @@ export function useDeploymentBuild(
         port: config.options.hasServer && config.options.productionPort
           ? Number(config.options.productionPort)
           : undefined,
-        publicEndpoints: !isServiceDeployment
+        publicEndpoints: !isServiceDeployment && !isMonorepoDeployment
           ? config.publicEndpoints.map((endpoint) => (
               serializeProjectPublicEndpoint(endpoint, config.options.hasServer)
             ))
           : undefined,
         hasServer: config.options.hasServer,
         hasBuild: config.options.hasBuild,
+        // Monorepo: persist the per-sub-app slices + shared workspace install.
+        projectType: isMonorepoDeployment ? "monorepo" : undefined,
+        monorepoApps: isMonorepoDeployment
+          ? (config.monorepoApps ?? []).map((app) => ({
+              name: app.name,
+              rootDirectory: app.rootDirectory,
+              framework: app.framework,
+              packageManager: app.packageManager,
+              buildImage: app.buildImage,
+              installCommand: app.installCommand || undefined,
+              buildCommand: app.buildCommand || undefined,
+              startCommand: app.startCommand || undefined,
+              outputDirectory: app.outputDirectory || undefined,
+              port: app.port ? Number(app.port) : undefined,
+              enabled: app.enabled,
+              exposed: true,
+            }))
+          : undefined,
+        monorepoWorkspace: isMonorepoDeployment && config.monorepoWorkspace
+          ? {
+              packageManager: config.monorepoWorkspace.packageManager,
+              installCommand: config.monorepoWorkspace.installCommand,
+            }
+          : undefined,
       });
 
       if (!projectData.success || !projectData.project_id) {

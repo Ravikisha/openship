@@ -22,6 +22,18 @@ export interface ServerOption {
   raw: ServerInfo;
 }
 
+/**
+ * Which workload this selector is picking a server FOR. Filters the list so
+ * we don't show servers that can't actually run the requested workload.
+ *
+ *   "apps"  — only servers with runsApps=true (default; for deploy pickers).
+ *             Hides email-only servers so they never show up as a deploy target.
+ *   "mail"  — only servers with runsMail=true (for the mail-server provisioning
+ *             page picker).
+ *   "any"   — every server, regardless of workload (server-settings UI etc.).
+ */
+export type ServerSelectorWorkload = "apps" | "mail" | "any";
+
 export interface ServerSelectorProps {
   /** Called when a server is selected (or null when deselected) */
   onSelect: (server: ServerOption | null) => void;
@@ -33,6 +45,8 @@ export interface ServerSelectorProps {
   disabled?: boolean;
   /** Show compact variant (no label) */
   compact?: boolean;
+  /** Filter the server list by workload capability. Defaults to "apps". */
+  forWorkload?: ServerSelectorWorkload;
 }
 
 /* ── Helpers ────────────────────────────────────────────────────────── */
@@ -50,12 +64,23 @@ function serverInfoToOption(s: ServerInfo): ServerOption {
 
 /* ── Component ──────────────────────────────────────────────────────── */
 
+/**
+ * True when `server` can host the requested workload.
+ * Mail-only servers are excluded from the apps picker (and vice versa).
+ */
+function serverMatchesWorkload(server: ServerInfo, workload: ServerSelectorWorkload): boolean {
+  if (workload === "apps") return server.runsApps;
+  if (workload === "mail") return server.runsMail;
+  return true; // "any"
+}
+
 export default function ServerSelector({
   onSelect,
   value,
   label = "Server",
   disabled = false,
   compact = false,
+  forWorkload = "apps",
 }: ServerSelectorProps) {
   const router = useRouter();
   const [servers, setServers] = useState<ServerOption[]>([]);
@@ -66,8 +91,9 @@ export default function ServerSelector({
     try {
       setLoading(true);
       const list = await systemApi.listServers();
-      if (list.length > 0) {
-        const opts = list.map(serverInfoToOption);
+      const filtered = list.filter((s) => serverMatchesWorkload(s, forWorkload));
+      if (filtered.length > 0) {
+        const opts = filtered.map(serverInfoToOption);
         setServers(opts);
         // Auto-select if only one
         if (opts.length === 1) onSelect(opts[0]);
@@ -81,7 +107,8 @@ export default function ServerSelector({
     } finally {
       setLoading(false);
     }
-  }, []); // onSelect intentionally excluded — we only call on mount
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [forWorkload]); // re-fetch+filter if workload changes; onSelect intentionally excluded
 
   useEffect(() => {
     fetchServers();

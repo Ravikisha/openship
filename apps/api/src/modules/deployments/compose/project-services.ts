@@ -25,6 +25,18 @@ export async function listProjectServices(projectId: string): Promise<Service[]>
   return repos.service.listByProject(projectId);
 }
 
+/** Compose services only (excludes monorepo sub-app rows). */
+export async function listProjectComposeServices(projectId: string): Promise<Service[]> {
+  const all = await repos.service.listByProject(projectId);
+  return all.filter((s) => s.kind !== "monorepo");
+}
+
+/** Monorepo sub-apps only. */
+export async function listProjectMonorepoApps(projectId: string): Promise<Service[]> {
+  const all = await repos.service.listByProject(projectId);
+  return all.filter((s) => s.kind === "monorepo");
+}
+
 export function projectServicesToComposeServices(services: Service[]): ComposeService[] {
   return services.map((service) => ({
     name: service.name,
@@ -50,7 +62,7 @@ export async function resolveProjectServicePreflightServices(
   requestServices?: ComposeService[] | null,
 ): Promise<ComposeService[]> {
   if (requestServices?.length) return requestServices;
-  const services = await listProjectServices(projectId);
+  const services = await listProjectComposeServices(projectId);
   return projectServicesToComposeServices(services.filter((service) => service.enabled));
 }
 
@@ -59,9 +71,18 @@ export async function shouldUseProjectServicePipeline(
   requestServices?: ComposeService[] | null,
 ): Promise<boolean> {
   if (requestServices?.length) return true;
-  if ((await listProjectServices(project.id)).length > 0) return true;
+  // Only compose rows trigger the compose pipeline — monorepo rows have their own.
+  if ((await listProjectComposeServices(project.id)).length > 0) return true;
 
   // Compatibility for existing compose projects that may not have synced
   // service rows yet. New behavior should be driven by project services.
   return isLegacyComposeProject(project);
+}
+
+/** True when the project has any enabled monorepo sub-app row. */
+export async function shouldUseProjectMonorepoPipeline(
+  project: Project,
+): Promise<boolean> {
+  const apps = await listProjectMonorepoApps(project.id);
+  return apps.some((a) => a.enabled);
 }

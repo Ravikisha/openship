@@ -2,7 +2,7 @@ import Link from "next/link";
 import { blogSource } from "@/lib/source";
 import type { Metadata } from "next";
 
-const SITE_URL = "https://openship.org";
+const SITE_URL = "https://openship.io";
 
 function getCategories() {
   const pages = blogSource.getPages();

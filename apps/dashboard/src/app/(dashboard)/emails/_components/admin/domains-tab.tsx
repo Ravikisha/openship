@@ -1,0 +1,457 @@
+"use client";
+
+/**
+ * Domains tab — list + create/edit/delete for vmail.domain rows.
+ *
+ * Real table layout (DataTable primitive) with sticky header, dense
+ * rows, and proper columns: Domain · Mailboxes · Aliases · Quota ·
+ * Status · actions. Skeleton placeholders cover loading.
+ */
+
+import { useCallback, useEffect, useState } from "react";
+import { Plus, Pencil, Trash2, Globe } from "lucide-react";
+import {
+  mailAdminApi,
+  type AdminDomain,
+  getApiErrorMessage,
+} from "@/lib/api";
+import { useModal } from "@/context/ModalContext";
+import {
+  DataTable,
+  RowIconButton,
+  type DataTableColumn,
+} from "./_shared/data-table";
+import { StatusPill } from "./_shared/status-pill";
+import {
+  Field,
+  FormModalContent,
+  inputClassName,
+} from "./_shared/form-modal-content";
+
+interface DomainsTabProps {
+  serverId: string;
+  primaryDomain: string;
+}
+
+export function DomainsTab({ serverId, primaryDomain }: DomainsTabProps) {
+  const { showModal, hideModal } = useModal();
+  const [rows, setRows] = useState<AdminDomain[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const reload = useCallback(async () => {
+    setError(null);
+    try {
+      const res = await mailAdminApi.domains.list(serverId);
+      setRows(res.domains);
+    } catch (err) {
+      setError(getApiErrorMessage(err, "Failed to load domains"));
+    } finally {
+      setLoading(false);
+    }
+  }, [serverId]);
+
+  useEffect(() => {
+    void reload();
+  }, [reload]);
+
+  const openCreate = () => {
+    const id = showModal({
+      maxWidth: "520px",
+      showCloseButton: false,
+      customContent: (
+        <CreateDomainForm
+          onCancel={() => hideModal(id)}
+          onCreated={() => {
+            hideModal(id);
+            void reload();
+          }}
+          serverId={serverId}
+        />
+      ),
+    });
+  };
+
+  const openEdit = (row: AdminDomain) => {
+    const id = showModal({
+      maxWidth: "520px",
+      showCloseButton: false,
+      customContent: (
+        <EditDomainForm
+          serverId={serverId}
+          row={row}
+          onCancel={() => hideModal(id)}
+          onSaved={() => {
+            hideModal(id);
+            void reload();
+          }}
+        />
+      ),
+    });
+  };
+
+  const openDelete = (row: AdminDomain) => {
+    const id = showModal({
+      maxWidth: "480px",
+      showCloseButton: false,
+      customContent: (
+        <DeleteDomainConfirm
+          serverId={serverId}
+          row={row}
+          onCancel={() => hideModal(id)}
+          onDeleted={() => {
+            hideModal(id);
+            void reload();
+          }}
+        />
+      ),
+    });
+  };
+
+  const columns: DataTableColumn<AdminDomain>[] = [
+    {
+      key: "domain",
+      header: "Domain",
+      width: "minmax(220px, 1.5fr)",
+      cell: (r) => (
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="w-9 h-9 rounded-lg bg-muted flex items-center justify-center shrink-0">
+            <Globe className="size-4 text-muted-foreground" strokeWidth={2} />
+          </div>
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-foreground truncate">
+              {r.domain}
+            </p>
+            {r.description && (
+              <p className="text-xs text-muted-foreground truncate mt-0.5">
+                {r.description}
+              </p>
+            )}
+          </div>
+        </div>
+      ),
+    },
+    {
+      key: "mailboxes",
+      header: "Mailboxes",
+      width: "110px",
+      align: "right",
+      hideBelow: "md",
+      cell: (r) => (
+        <span className="text-sm text-foreground tabular-nums">
+          {r.mailboxes}
+        </span>
+      ),
+    },
+    {
+      key: "aliases",
+      header: "Aliases",
+      width: "110px",
+      align: "right",
+      hideBelow: "md",
+      cell: (r) => (
+        <span className="text-sm text-foreground tabular-nums">
+          {r.aliases}
+        </span>
+      ),
+    },
+    {
+      key: "quota",
+      header: "Default quota",
+      width: "130px",
+      align: "right",
+      hideBelow: "lg",
+      cell: (r) => (
+        <span className="text-sm text-muted-foreground tabular-nums">
+          {r.defaultQuotaMB > 0
+            ? `${(r.defaultQuotaMB / 1024).toFixed(1)} GB`
+            : "—"}
+        </span>
+      ),
+    },
+    {
+      key: "status",
+      header: "Status",
+      width: "120px",
+      cell: (r) => (
+        <div className="flex items-center gap-1.5 flex-wrap">
+          {r.active ? (
+            <StatusPill tone="success" dot>
+              Active
+            </StatusPill>
+          ) : (
+            <StatusPill tone="neutral" dot>
+              Disabled
+            </StatusPill>
+          )}
+          {r.domain === primaryDomain && (
+            <StatusPill tone="info">Primary</StatusPill>
+          )}
+        </div>
+      ),
+    },
+  ];
+
+  return (
+    <div className="space-y-5">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="min-w-0">
+          <h2 className="text-lg font-semibold text-foreground">
+            Domains
+          </h2>
+          <p className="text-sm text-muted-foreground mt-0.5 max-w-2xl">
+            Each row maps to a row in vmail.domain on the mail VPS.
+            Additional domains accept mail once their MX record points here.
+          </p>
+        </div>
+        <button
+          onClick={openCreate}
+          className="inline-flex items-center gap-2 px-4 py-2.5 bg-primary text-primary-foreground text-sm font-medium rounded-xl hover:bg-primary/90 transition-all hover:shadow-lg hover:shadow-primary/25 shrink-0"
+        >
+          <Plus className="size-4" />
+          Add domain
+        </button>
+      </div>
+
+      {error && (
+        <div className="rounded-xl border border-red-500/30 bg-red-500/5 px-4 py-3 text-sm text-red-600 dark:text-red-400">
+          {error}
+        </div>
+      )}
+
+      <DataTable
+        columns={columns}
+        rows={rows}
+        rowKey={(r) => r.domain}
+        loading={loading}
+        rowActions={(row) => (
+          <>
+            <RowIconButton
+              icon={Pencil}
+              label="Edit"
+              onClick={() => openEdit(row)}
+            />
+            <RowIconButton
+              icon={Trash2}
+              label="Delete"
+              variant="danger"
+              disabled={row.domain === primaryDomain && row.mailboxes > 0}
+              onClick={() => openDelete(row)}
+            />
+          </>
+        )}
+        empty={{
+          icon: Globe,
+          title: "No domains yet",
+          description:
+            "Add a domain to start hosting mailboxes under it. Make sure its MX record points to this mail server.",
+          action: (
+            <button
+              onClick={openCreate}
+              className="inline-flex items-center gap-2 px-5 py-2.5 bg-primary text-primary-foreground text-sm font-medium rounded-xl hover:bg-primary/90 transition-colors"
+            >
+              <Plus className="size-4" />
+              Add domain
+            </button>
+          ),
+        }}
+      />
+    </div>
+  );
+}
+
+// ─── Create form ─────────────────────────────────────────────────────────────
+
+function CreateDomainForm({
+  serverId,
+  onCancel,
+  onCreated,
+}: {
+  serverId: string;
+  onCancel: () => void;
+  onCreated: () => void;
+}) {
+  const [domain, setDomain] = useState("");
+  const [description, setDescription] = useState("");
+  const [defaultQuotaGB, setDefaultQuotaGB] = useState("");
+
+  const submit = async () => {
+    await mailAdminApi.domains.create(serverId, {
+      domain: domain.trim().toLowerCase(),
+      description: description.trim() || undefined,
+      defaultQuotaMB: defaultQuotaGB
+        ? Math.round(Number(defaultQuotaGB) * 1024)
+        : undefined,
+    });
+    onCreated();
+  };
+
+  return (
+    <FormModalContent
+      title="Add domain"
+      description="Adds a new entry to vmail.domain on the mail VPS. Make sure the MX record for this domain points to the mail server before sending mail through it."
+      submitLabel="Create domain"
+      submittingLabel="Creating…"
+      onSubmit={submit}
+      onCancel={onCancel}
+      disabled={!domain.trim()}
+    >
+      <Field label="Domain" hint="e.g. acme.com — no protocol, no path.">
+        <input
+          type="text"
+          autoFocus
+          value={domain}
+          onChange={(e) => setDomain(e.target.value)}
+          placeholder="acme.com"
+          className={inputClassName}
+        />
+      </Field>
+      <Field label="Description" hint="Optional — shown only in the dashboard.">
+        <input
+          type="text"
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          placeholder="Acme Corp marketing"
+          className={inputClassName}
+        />
+      </Field>
+      <Field
+        label="Default mailbox quota (GB)"
+        hint="Optional. Default for new mailboxes in this domain; can be overridden per mailbox. Leave blank for unlimited."
+      >
+        <input
+          type="number"
+          min={0}
+          step={0.5}
+          value={defaultQuotaGB}
+          onChange={(e) => setDefaultQuotaGB(e.target.value)}
+          placeholder="5"
+          className={inputClassName}
+        />
+      </Field>
+    </FormModalContent>
+  );
+}
+
+// ─── Edit form ───────────────────────────────────────────────────────────────
+
+function EditDomainForm({
+  serverId,
+  row,
+  onCancel,
+  onSaved,
+}: {
+  serverId: string;
+  row: AdminDomain;
+  onCancel: () => void;
+  onSaved: () => void;
+}) {
+  const [description, setDescription] = useState(row.description);
+  const [defaultQuotaGB, setDefaultQuotaGB] = useState(
+    row.defaultQuotaMB > 0 ? String(row.defaultQuotaMB / 1024) : "",
+  );
+  const [active, setActive] = useState(row.active);
+
+  const submit = async () => {
+    await mailAdminApi.domains.update(serverId, row.domain, {
+      description,
+      defaultQuotaMB: defaultQuotaGB ? Math.round(Number(defaultQuotaGB) * 1024) : 0,
+      active,
+    });
+    onSaved();
+  };
+
+  return (
+    <FormModalContent
+      title={`Edit ${row.domain}`}
+      submitLabel="Save changes"
+      submittingLabel="Saving…"
+      onSubmit={submit}
+      onCancel={onCancel}
+    >
+      <Field label="Description">
+        <input
+          type="text"
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          className={inputClassName}
+        />
+      </Field>
+      <Field
+        label="Default mailbox quota (GB)"
+        hint="Leave blank or 0 for unlimited."
+      >
+        <input
+          type="number"
+          min={0}
+          step={0.5}
+          value={defaultQuotaGB}
+          onChange={(e) => setDefaultQuotaGB(e.target.value)}
+          className={inputClassName}
+        />
+      </Field>
+      <label className="flex items-start gap-3 cursor-pointer p-3 -mx-1 rounded-xl hover:bg-muted/30 transition-colors">
+        <input
+          type="checkbox"
+          checked={active}
+          onChange={(e) => setActive(e.target.checked)}
+          className="rounded border-border mt-0.5"
+        />
+        <span>
+          <span className="block text-sm font-medium text-foreground">
+            Active
+          </span>
+          <span className="block text-xs text-muted-foreground mt-0.5 leading-relaxed">
+            When unchecked, mail addressed to this domain is rejected at the
+            MX gate.
+          </span>
+        </span>
+      </label>
+    </FormModalContent>
+  );
+}
+
+// ─── Delete confirm ──────────────────────────────────────────────────────────
+
+function DeleteDomainConfirm({
+  serverId,
+  row,
+  onCancel,
+  onDeleted,
+}: {
+  serverId: string;
+  row: AdminDomain;
+  onCancel: () => void;
+  onDeleted: () => void;
+}) {
+  const blocked = row.mailboxes > 0 || row.aliases > 0;
+
+  const submit = async () => {
+    if (blocked) {
+      throw new Error(
+        `Domain still has ${row.mailboxes} mailbox(es) and ${row.aliases} alias(es). Delete those first.`,
+      );
+    }
+    await mailAdminApi.domains.delete(serverId, row.domain);
+    onDeleted();
+  };
+
+  return (
+    <FormModalContent
+      title={`Delete ${row.domain}?`}
+      description={
+        blocked
+          ? `This domain still has ${row.mailboxes} mailbox(es) and ${row.aliases} alias(es). Remove them first, then delete the domain.`
+          : "Removes the row from vmail.domain and any domain-admin mappings. Mail to this domain will start being rejected immediately."
+      }
+      submitLabel="Delete domain"
+      submittingLabel="Deleting…"
+      submitVariant="danger"
+      onSubmit={submit}
+      onCancel={onCancel}
+      disabled={blocked}
+    >
+      <div />
+    </FormModalContent>
+  );
+}

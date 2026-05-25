@@ -71,6 +71,41 @@
       "when": 1777420800000,
       "tag": "0009_domain_target_path",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1779250522574,
+      "tag": "0010_bumpy_talisman",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1779337000000,
+      "tag": "0011_server_role",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1779423400000,
+      "tag": "0012_server_capabilities",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1779510000000,
+      "tag": "0013_mail_setup_session",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1779596400000,
+      "tag": "0014_drop_mail_setup_session",
+      "breakpoints": true
     }
   ]
 }

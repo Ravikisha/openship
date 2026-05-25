@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useRef, useState } from "react";
 import {
   Mail,
   Shield,
@@ -12,9 +13,16 @@ import {
   OctagonX,
   ArrowRightLeft,
   Skull,
+  ChevronDown,
 } from "lucide-react";
-import type { MailSetupStatus, DnsRecords, PortConflict } from "@/lib/api";
+import type {
+  MailSetupStatus,
+  MailStepStatus,
+  DnsRecords,
+  PortConflict,
+} from "@/lib/api";
 import { DnsRecordCard } from "./dns-record-card";
+import { StepIcon } from "./step-icon";
 
 interface CompletionData {
   webmailUrl: string;
@@ -25,12 +33,16 @@ interface CompletionData {
 interface MailSidebarProps {
   domain: string;
   status: MailSetupStatus | null;
+  steps: MailStepStatus[];
   dnsRecords: DnsRecords | null;
   completionData: CompletionData | null;
   portConflicts: PortConflict[] | null;
   resolving: boolean;
   running: boolean;
   isCompleted: boolean;
+  resumeStep: number | null;
+  /** True while the DNS hold banner is showing — sidebar hides its records card to avoid duplication. */
+  dnsBannerActive: boolean;
   onResolveConflict: (conflict: PortConflict, resolutionId: string) => void;
   onResume: (fromStep: number) => void;
 }
@@ -38,15 +50,19 @@ interface MailSidebarProps {
 export function MailSidebar({
   domain,
   status,
+  steps,
   dnsRecords,
   completionData,
   portConflicts,
   resolving,
   running,
   isCompleted,
+  resumeStep,
+  dnsBannerActive,
   onResolveConflict,
   onResume,
 }: MailSidebarProps) {
+  const completedCount = steps.filter((s) => s.status === "completed").length;
   return (
     <div className="space-y-4">
       {/* Port conflict resolution */}
@@ -226,22 +242,29 @@ export function MailSidebar({
         </div>
       )}
 
-      {/* DNS Records */}
-      {dnsRecords && (
-        <div className="bg-card rounded-2xl border border-border/50 p-5">
-          <h3 className="text-sm font-semibold text-foreground mb-4">
-            Required DNS Records
-          </h3>
-          <p className="text-xs text-muted-foreground mb-4">
-            Add these records to your domain&apos;s DNS provider
-          </p>
-          <div className="space-y-3">
-            <DnsRecordCard label="DKIM" record={dnsRecords.dkim} />
-            <DnsRecordCard label="MX Record" record={dnsRecords.mx} />
-            <DnsRecordCard label="SPF" record={dnsRecords.spf} />
-            <DnsRecordCard label="DMARC" record={dnsRecords.dmarc} />
-          </div>
-        </div>
+      {/* DNS Records — hidden while the top-level DnsHoldBanner is taking
+          the entire page width, since duplicating four record cards on
+          both surfaces is noise. The banner has the same content + copy
+          buttons + auto-configure CTA. This card returns post-install
+          as a collapsed reference (the user has already set them; they
+          just want to be able to peek without scrolling through walls of
+          mono-font value strings). */}
+      {dnsRecords && !dnsBannerActive && (
+        <DnsRecordsCollapsibleCard dnsRecords={dnsRecords} />
+      )}
+
+      {/* All steps — full install plan + roadmap. Auto-scrolls to the
+          active step; the user can also scroll up/down freely to review
+          finished steps or peek ahead. The failed row carries an inline
+          Retry so the action is right where the eye lands. */}
+      {steps.length > 0 && (
+        <AllStepsCard
+          steps={steps}
+          completedCount={completedCount}
+          resumeStep={resumeStep}
+          running={running}
+          onResume={onResume}
+        />
       )}
 
       {/* Setup domain info */}
@@ -270,4 +293,213 @@ export function MailSidebar({
       )}
     </div>
   );
+}
+
+// ─── All-steps card ──────────────────────────────────────────────────────────
+
+interface AllStepsCardProps {
+  steps: MailStepStatus[];
+  completedCount: number;
+  resumeStep: number | null;
+  running: boolean;
+  onResume: (fromStep: number) => void;
+}
+
+/**
+ * Scrollable plan: completed steps above, current/failed step highlighted,
+ * upcoming steps below — with the active row auto-scrolled into view as the
+ * pipeline progresses. The container caps height + scrolls so it works on
+ * any viewport without bloating the right column.
+ */
+function AllStepsCard({
+  steps,
+  completedCount,
+  resumeStep,
+  running,
+  onResume,
+}: AllStepsCardProps) {
+  const listRef = useRef<HTMLOListElement>(null);
+  const activeRowRef = useRef<HTMLLIElement>(null);
+
+  // Pick the row to keep in view: running step beats failed (during a live
+  // run) beats just-completed (so finished installs land at the bottom).
+  const activeId = pickActiveStepId(steps);
+
+  // "Stalled" = some steps are still pending AND we're not running AND we
+  // don't have an explicit resumeStep (e.g. SSE dropped mid-install before
+  // the controller could persist a halt state). The first non-completed
+  // step is where we'd resume from.
+  const firstPendingId = steps.find((s) => s.status !== "completed")?.id;
+  const isStalled =
+    !running &&
+    completedCount < steps.length &&
+    firstPendingId !== undefined &&
+    resumeStep == null &&
+    !steps.some((s) => s.status === "failed");
+
+  useEffect(() => {
+    if (!activeRowRef.current || !listRef.current) return;
+    // `nearest` keeps user scroll position when the active row is already
+    // visible; only scrolls when it's actually off-screen. That way the user
+    // can scroll up/down to inspect other steps without being yanked back
+    // unless something new happens.
+    activeRowRef.current.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [activeId]);
+
+  return (
+    <div className="bg-card rounded-2xl border border-border/50 overflow-hidden">
+      <div className="px-5 py-3.5 border-b border-border/50 flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-foreground">All steps</h3>
+        <span className="text-xs text-muted-foreground/70 tabular-nums">
+          {completedCount} / {steps.length}
+        </span>
+      </div>
+
+      {isStalled && firstPendingId !== undefined && (
+        <div className="px-5 py-3 border-b border-amber-500/20 bg-amber-500/5 flex items-center justify-between gap-3">
+          <p className="text-xs text-amber-700 dark:text-amber-400 min-w-0">
+            Install was interrupted before step {firstPendingId}. Resume to pick up where it left off.
+          </p>
+          <button
+            onClick={() => onResume(firstPendingId)}
+            className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-md bg-amber-500 text-white hover:bg-amber-500/90 transition-colors shrink-0"
+          >
+            <RotateCcw className="size-3" />
+            Resume
+          </button>
+        </div>
+      )}
+
+      <ol
+        ref={listRef}
+        className="divide-y divide-border/30 max-h-[60vh] overflow-y-auto"
+      >
+        {steps.map((s) => {
+          const isActive = s.id === activeId;
+          const isFailed = s.status === "failed";
+          const isCurrent = s.status === "running";
+          const showRetry =
+            isFailed && resumeStep === s.id && !running;
+          return (
+            <li
+              key={s.id}
+              ref={isActive ? activeRowRef : null}
+              className={`flex items-center gap-3 px-4 py-2.5 ${
+                isCurrent
+                  ? "bg-blue-500/5"
+                  : isFailed
+                    ? "bg-red-500/5"
+                    : ""
+              }`}
+            >
+              <div className="w-6 flex items-center justify-center shrink-0">
+                <StepIcon status={s.status} />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <span
+                    className={`text-xs tabular-nums ${
+                      s.status === "completed"
+                        ? "text-muted-foreground/60"
+                        : "text-muted-foreground/50"
+                    }`}
+                  >
+                    {String(s.id).padStart(2, " ")}
+                  </span>
+                  <span
+                    className={`text-[13px] truncate ${
+                      isCurrent
+                        ? "text-blue-600 dark:text-blue-400 font-medium"
+                        : s.status === "completed"
+                          ? "text-foreground"
+                          : isFailed
+                            ? "text-red-600 dark:text-red-400 font-medium"
+                            : "text-muted-foreground/70"
+                    }`}
+                  >
+                    {s.label}
+                  </span>
+                  {s.warning && (
+                    <AlertTriangle className="size-3 text-amber-500 shrink-0" />
+                  )}
+                </div>
+                {(isCurrent || isFailed) && s.message && (
+                  <p
+                    className={`text-[11px] mt-0.5 truncate ${
+                      isFailed
+                        ? "text-red-500/80"
+                        : "text-muted-foreground/70"
+                    }`}
+                  >
+                    {s.message}
+                  </p>
+                )}
+              </div>
+              {showRetry && (
+                <button
+                  onClick={() => onResume(s.id)}
+                  className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors shrink-0"
+                >
+                  <RotateCcw className="size-3" />
+                  Retry
+                </button>
+              )}
+            </li>
+          );
+        })}
+      </ol>
+    </div>
+  );
+}
+
+/**
+ * Collapsed-by-default DNS reference. Once the user has acked the records
+ * we don't need to shove the full grid in their face — they just want it
+ * a click away if they need to re-verify.
+ */
+function DnsRecordsCollapsibleCard({ dnsRecords }: { dnsRecords: DnsRecords }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="bg-card rounded-2xl border border-border/50 overflow-hidden">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center justify-between gap-3 px-5 py-3.5 text-left hover:bg-muted/30 transition-colors"
+        aria-expanded={open}
+      >
+        <div className="min-w-0">
+          <h3 className="text-sm font-semibold text-foreground">
+            Required DNS Records
+          </h3>
+          <p className="text-xs text-muted-foreground/70 mt-0.5">
+            Reference — tap to view the records you published
+          </p>
+        </div>
+        <ChevronDown
+          className={`size-4 text-muted-foreground shrink-0 transition-transform ${
+            open ? "rotate-180" : ""
+          }`}
+        />
+      </button>
+      {open && (
+        <div className="px-5 pb-5 pt-1 space-y-3 border-t border-border/30">
+          <DnsRecordCard label="DKIM" record={dnsRecords.dkim} />
+          <DnsRecordCard label="MX Record" record={dnsRecords.mx} />
+          <DnsRecordCard label="SPF" record={dnsRecords.spf} />
+          <DnsRecordCard label="DMARC" record={dnsRecords.dmarc} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function pickActiveStepId(steps: MailStepStatus[]): number | null {
+  const running = steps.find((s) => s.status === "running");
+  if (running) return running.id;
+  const failed = steps.find((s) => s.status === "failed");
+  if (failed) return failed.id;
+  let last: number | null = null;
+  for (const s of steps) {
+    if (s.status === "completed") last = s.id;
+  }
+  return last;
 }

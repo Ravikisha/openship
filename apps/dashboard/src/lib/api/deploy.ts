@@ -36,7 +36,7 @@ export interface PrepareComposeService {
 
 export interface PrepareAppConfig {
   stack: StackId;
-  projectType: "app" | "docker" | "services";
+  projectType: "app" | "docker" | "services" | "monorepo";
   category: string;
   packageManager: string;
   buildCommand: string;
@@ -53,6 +53,29 @@ export interface PrepareAppConfig {
 
 export type PrepareSingleAppCandidate = PrepareAppConfig;
 
+/** One deployable sub-app discovered inside a monorepo. */
+export interface PrepareMonorepoApp {
+  id: string;
+  name: string;
+  rootDirectory: string;
+  stack: StackId;
+  category: string;
+  packageManager: string;
+  buildCommand: string;
+  installCommand: string;
+  startCommand: string;
+  buildImage: string;
+  outputDirectory: string;
+  productionPaths: string[];
+  port: number;
+}
+
+/** Shared workspace metadata when the repo root declares pnpm/npm/yarn workspaces. */
+export interface PrepareMonorepoWorkspace {
+  packageManager: string;
+  installCommand: string;
+}
+
 export interface PrepareProjectResponse extends PrepareAppConfig {
   repository: {
     name: string;
@@ -67,6 +90,8 @@ export interface PrepareProjectResponse extends PrepareAppConfig {
   };
   singleAppCandidate?: PrepareSingleAppCandidate;
   services?: PrepareComposeService[];
+  monorepoApps?: PrepareMonorepoApp[];
+  monorepoWorkspace?: PrepareMonorepoWorkspace;
   rootEnv?: Record<string, string>;
   error?: string;
   current_status?: string;

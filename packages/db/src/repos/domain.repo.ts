@@ -136,6 +136,11 @@ export function createDomainRepo(db: Database) {
       await db.delete(domain).where(eq(domain.id, id));
     },
 
+    /** Hard-delete every domain row tied to a project. Frees managed slugs immediately on project teardown. */
+    async deleteByProjectId(projectId: string) {
+      await db.delete(domain).where(eq(domain.projectId, projectId));
+    },
+
     /** Find all domains needing SSL renewal */
     async findExpiringSsl(beforeDate: Date) {
       return db.query.domain.findMany({

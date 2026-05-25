@@ -5,7 +5,7 @@ import type { Metadata } from "next";
 import BlogShareSidebar from "@/components/blog/share-sidebar";
 import BlogWriterSidebar from "@/components/blog/writer-sidebar";
 
-const SITE_URL = "https://openship.org";
+const SITE_URL = "https://openship.io";
 
 type Params = Promise<{ slug: string[] }>;
 

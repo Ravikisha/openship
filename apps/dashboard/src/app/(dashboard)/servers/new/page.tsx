@@ -12,6 +12,9 @@ import {
   ChevronDown,
   Network,
   Info,
+  Rocket,
+  Mail,
+  Layers,
 } from "lucide-react";
 import { getApiErrorMessage, systemApi } from "@/lib/api";
 import type { ComponentStatus, SetupComponentProgress, SetupLogEvent, ServerInfo } from "@/lib/api/system";
@@ -84,6 +87,12 @@ export default function AddServerPage() {
   const [loaded, setLoaded] = useState(false);
 
   const [serverName, setServerName] = useState("");
+  // What this server runs — two orthogonal capabilities. Picked in the
+  // first step before any credentials are entered. They can BOTH be true
+  // (one VPS running apps AND the mail stack side by side); at least one must be
+  // on. Mirrors backend `servers.runsApps / runsMail` columns.
+  const [runsApps, setRunsApps] = useState(true);
+  const [runsMail, setRunsMail] = useState(false);
   const [sshHost, setSshHost] = useState("");
   const [sshPort, setSshPort] = useState("22");
   const [sshUser, setSshUser] = useState("root");
@@ -100,7 +109,11 @@ export default function AddServerPage() {
   const [existingServerId, setExistingServerId] = useState<string | null>(null);
   const [initialServer, setInitialServer] = useState<ServerInfo | null>(null);
 
-  const [step, setStep] = useState<Step | null>(null);
+  // First-time visitors land on the capability picker — "what does this
+  // server run?". Once they confirm, step flips to null so the credentials
+  // form renders. Existing-server edits also start at null since the
+  // capability is already on the row and rendered inside the form header.
+  const [step, setStep] = useState<Step | null>("capability");
   const [mode, setMode] = useState<SetupMode>(null);
   const [components, setComponents] = useState<ComponentState[]>(() =>
     buildComponentStates(),
@@ -146,6 +159,11 @@ export default function AddServerPage() {
           setExistingServerId(existing.id);
           setInitialServer(existing);
           setServerName(existing.name ?? "");
+          setRunsApps(existing.runsApps);
+          setRunsMail(existing.runsMail);
+          // Existing server already has its capability picked; skip
+          // the capability step entirely and go straight to the form.
+          setStep(null);
           setSshHost(existing.sshHost);
           setSshPort(String(existing.sshPort ?? 22));
           setSshUser(existing.sshUser ?? "root");
@@ -282,6 +300,8 @@ export default function AddServerPage() {
     try {
       const data: Record<string, unknown> = {
         name: trimmedServerName || null,
+        runsApps,
+        runsMail,
         sshHost: trimmedHost,
         sshPort: currentPort,
         sshUser: trimmedUser,
@@ -314,6 +334,8 @@ export default function AddServerPage() {
       setInitialServer({
         id: savedServerId,
         name: trimmedServerName || null,
+        runsApps,
+        runsMail,
         sshHost: trimmedHost,
         sshPort: currentPort,
         sshUser: trimmedUser,
@@ -327,6 +349,20 @@ export default function AddServerPage() {
       if (isEditing) {
         showToast("Server updated", "success", "Server");
         router.push("/servers");
+        return;
+      }
+
+      // Mail-only servers SKIP the Docker / build-agent install flow entirely.
+      // The mail-server provisioning flow takes over from the server detail
+      // page. Servers that ALSO run apps fall through to the standard
+      // component-install flow below.
+      if (runsMail && !runsApps) {
+        showToast(
+          "Email server saved. Open it to finish setup.",
+          "success",
+          "Server",
+        );
+        router.push(`/servers/${savedServerId}`);
         return;
       }
 
@@ -414,6 +450,218 @@ export default function AddServerPage() {
   }
 
   if (step) {
+    // First decision — picked BEFORE credentials. Three product-style
+    // cards, no implementation jargon. Continue flips `step` to `null`,
+    // which renders the credentials form with a "you picked X" reminder.
+    if (step === "capability") {
+      const canContinue = runsApps || runsMail;
+
+      type CardId = "apps" | "mail" | "both";
+      type FeatureLine = string;
+      const options: Array<{
+        id: CardId;
+        icon: typeof Rocket;
+        accent: string; // tailwind class for the icon bg + border accent
+        title: string;
+        tagline: string;
+        features: FeatureLine[];
+        runsApps: boolean;
+        runsMail: boolean;
+      }> = [
+        {
+          id: "apps",
+          icon: Rocket,
+          accent: "violet",
+          title: "Deploy server",
+          tagline: "Host your apps, APIs, and sites",
+          features: [
+            "Unlimited deployments",
+            "Push-to-deploy from git",
+            "Auto SSL · custom domains",
+            "Instant rollbacks",
+          ],
+          runsApps: true,
+          runsMail: false,
+        },
+        {
+          id: "mail",
+          icon: Mail,
+          accent: "emerald",
+          title: "Email server",
+          tagline: "Run your own email — no per-mailbox fees",
+          features: [
+            "Unlimited mailboxes",
+            "Unlimited email domains",
+            "Built-in anti-spam · anti-virus",
+            "SPF · DKIM · DMARC auto-configured",
+          ],
+          runsApps: false,
+          runsMail: true,
+        },
+        {
+          id: "both",
+          icon: Layers,
+          accent: "amber",
+          title: "Both",
+          tagline: "Apps and email on the same VPS",
+          features: [
+            "Everything from Deploy server",
+            "Everything from Email server",
+            "One VPS, one bill",
+            "Best for small teams",
+          ],
+          runsApps: true,
+          runsMail: true,
+        },
+      ];
+
+      const activeId: CardId =
+        runsApps && runsMail ? "both" : runsMail ? "mail" : "apps";
+
+      const accentClasses: Record<
+        string,
+        {
+          iconBg: string;
+          iconText: string;
+          activeBorder: string;
+          activeBg: string;
+          activeRing: string;
+        }
+      > = {
+        violet: {
+          iconBg: "bg-violet-500/10",
+          iconText: "text-violet-500",
+          activeBorder: "border-violet-500/60",
+          activeBg: "bg-violet-500/[0.04]",
+          activeRing: "ring-violet-500/20",
+        },
+        emerald: {
+          iconBg: "bg-emerald-500/10",
+          iconText: "text-emerald-500",
+          activeBorder: "border-emerald-500/60",
+          activeBg: "bg-emerald-500/[0.04]",
+          activeRing: "ring-emerald-500/20",
+        },
+        amber: {
+          iconBg: "bg-amber-500/10",
+          iconText: "text-amber-500",
+          activeBorder: "border-amber-500/60",
+          activeBg: "bg-amber-500/[0.04]",
+          activeRing: "ring-amber-500/20",
+        },
+      };
+
+      return (
+        <PageContainer className="max-w-[1180px]">
+          <div className="flex items-center gap-3 mb-8">
+            <button
+              onClick={() => router.push("/servers")}
+              className="w-8 h-8 rounded-lg hover:bg-muted flex items-center justify-center transition-colors"
+            >
+              <ArrowLeft className="size-4 text-muted-foreground" />
+            </button>
+            <div>
+              <h1
+                className="text-2xl font-medium text-foreground/85"
+                style={{ letterSpacing: "-0.3px" }}
+              >
+                What will this server do?
+              </h1>
+              <p className="text-sm text-muted-foreground/70 mt-0.5">
+                Pick the workload. You can change this later.
+              </p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {options.map((option) => {
+              const active = activeId === option.id;
+              const Icon = option.icon;
+              const accent = accentClasses[option.accent]!;
+              return (
+                <button
+                  type="button"
+                  key={option.id}
+                  onClick={() => {
+                    setRunsApps(option.runsApps);
+                    setRunsMail(option.runsMail);
+                  }}
+                  className={`group text-left rounded-2xl border p-6 transition-all ${
+                    active
+                      ? `${accent.activeBorder} ${accent.activeBg} ring-4 ${accent.activeRing} shadow-sm`
+                      : "border-border/50 bg-card hover:border-border hover:shadow-sm"
+                  }`}
+                >
+                  <div className="flex items-start justify-between mb-5">
+                    <div
+                      className={`w-11 h-11 rounded-xl flex items-center justify-center ${accent.iconBg}`}
+                    >
+                      <Icon className={`size-5 ${accent.iconText}`} strokeWidth={1.75} />
+                    </div>
+                    <div
+                      className={`size-5 rounded-full border-2 transition-colors ${
+                        active
+                          ? `${accent.activeBorder} bg-current ${accent.iconText}`
+                          : "border-border/60 bg-background"
+                      }`}
+                    >
+                      {active && (
+                        <Check className="size-3 text-white mx-auto mt-[1px]" strokeWidth={3} />
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="text-[17px] font-semibold text-foreground tracking-tight">
+                    {option.title}
+                  </div>
+                  <div className="text-[13px] text-muted-foreground/80 mt-1 leading-snug">
+                    {option.tagline}
+                  </div>
+
+                  <ul className="mt-5 space-y-2">
+                    {option.features.map((feature) => (
+                      <li
+                        key={feature}
+                        className="flex items-start gap-2 text-[13px] text-foreground/75"
+                      >
+                        <Check
+                          className={`size-3.5 mt-0.5 flex-shrink-0 ${accent.iconText}`}
+                          strokeWidth={2.5}
+                        />
+                        <span className="leading-snug">{feature}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="mt-8 flex items-center justify-end gap-3">
+            <button
+              type="button"
+              onClick={() => router.push("/servers")}
+              className="px-4 py-2 rounded-lg text-sm font-medium text-muted-foreground hover:bg-muted/40 transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              disabled={!canContinue}
+              onClick={() => setStep(null)}
+              className={`px-5 py-2 rounded-lg text-sm font-medium transition-colors ${
+                canContinue
+                  ? "bg-foreground text-background hover:bg-foreground/90"
+                  : "bg-muted text-muted-foreground/50 cursor-not-allowed"
+              }`}
+            >
+              Continue
+            </button>
+          </div>
+        </PageContainer>
+      );
+    }
+
     return (
       <PageContainer className="max-w-[1180px]">
           <SetupHeader
@@ -525,6 +773,37 @@ export default function AddServerPage() {
 
         <div className="grid grid-cols-1 lg:grid-cols-[1fr_340px] gap-6">
           <div className="space-y-6 min-w-0">
+            {/* Reminder of the workload the user picked in step 1. Clicking
+                "Change" sends them back to the capability step so they don't
+                have to retype credentials to change their choice. */}
+            <div className="flex items-center justify-between gap-3 rounded-xl border border-border/50 bg-muted/20 px-4 py-3">
+              <div className="flex items-center gap-2.5 text-sm">
+                {runsApps && runsMail ? (
+                  <Layers className="size-4 text-amber-500" strokeWidth={1.75} />
+                ) : runsMail ? (
+                  <Mail className="size-4 text-emerald-500" strokeWidth={1.75} />
+                ) : (
+                  <Rocket className="size-4 text-violet-500" strokeWidth={1.75} />
+                )}
+                <span className="font-medium text-foreground">
+                  {runsApps && runsMail
+                    ? "Deploy + Email server"
+                    : runsMail
+                      ? "Email server"
+                      : "Deploy server"}
+                </span>
+              </div>
+              {!hasExistingServer && (
+                <button
+                  type="button"
+                  onClick={() => setStep("capability")}
+                  className="text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  Change
+                </button>
+              )}
+            </div>
+
             <div className="bg-card rounded-2xl border border-border/50">
               <div className="flex items-center gap-3 px-5 py-4 border-b border-border/50">
                 <div className="w-9 h-9 bg-blue-500/10 rounded-xl flex items-center justify-center">

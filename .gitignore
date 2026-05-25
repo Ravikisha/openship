@@ -15,6 +15,9 @@ out/
 .env.*.local
 .env.saas
 
+# Dev-only generated secrets (per-machine, not for prod)
+.dev-secrets.json
+
 # IDE
 .vscode/
 .idea/

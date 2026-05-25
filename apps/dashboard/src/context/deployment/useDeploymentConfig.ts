@@ -8,7 +8,7 @@ import { ApiError, getApiErrorMessage } from "@/lib/api/client";
 import { settingsApi } from "@/lib/api/settings";
 import type { BuildMode } from "@/lib/api/settings";
 import { STACKS, type StackDefinition } from "@repo/core";
-import type { BuildStrategy, DeploymentConfig, DeploymentModeSnapshot } from "./types";
+import type { BuildStrategy, DeploymentConfig, DeploymentModeSnapshot, MonorepoAppConfig, MonorepoWorkspaceConfig } from "./types";
 import {
   DEFAULT_CONFIG,
   createPublicEndpoint,
@@ -43,6 +43,48 @@ interface PreparedProjectContext {
   singleStackDef: StackDefinition | undefined;
   composeDefaults: DeploymentConfig["composeDefaults"];
   preparedOptions: DeploymentConfig["options"];
+  monorepoApps?: MonorepoAppConfig[];
+  monorepoWorkspace?: MonorepoWorkspaceConfig;
+}
+
+function buildMonorepoApps(response: PrepareProjectResponse): MonorepoAppConfig[] | undefined {
+  if (!response.monorepoApps?.length) return undefined;
+
+  return response.monorepoApps.map((app): MonorepoAppConfig => {
+    const detectedFramework = (app.stack || "unknown") as FrameworkId;
+    const hasServer = !!app.startCommand;
+    const hasBuild = !!app.buildCommand;
+    const portString = app.port ? String(app.port) : "";
+
+    return {
+      id: app.id || app.rootDirectory,
+      name: app.name || app.rootDirectory.split("/").at(-1) || app.rootDirectory,
+      enabled: true,
+      framework: detectedFramework,
+      detectedFramework,
+      packageManager: app.packageManager || response.packageManager || "npm",
+      buildImage: app.buildImage || response.buildImage || "node:22",
+      rootDirectory: app.rootDirectory,
+      installCommand: app.installCommand || "",
+      buildCommand: app.buildCommand || "",
+      startCommand: app.startCommand || "",
+      outputDirectory: app.outputDirectory || "",
+      productionPaths: app.productionPaths || [],
+      port: portString,
+      hasServer,
+      hasBuild,
+      envVars: [],
+      publicEndpoints: ensurePublicEndpoints(undefined, hasServer ? { port: portString } : { targetPath: "/" }),
+    };
+  });
+}
+
+function buildMonorepoWorkspace(response: PrepareProjectResponse): MonorepoWorkspaceConfig | undefined {
+  if (!response.monorepoWorkspace) return undefined;
+  return {
+    packageManager: response.monorepoWorkspace.packageManager || "npm",
+    installCommand: response.monorepoWorkspace.installCommand || "",
+  };
 }
 
 interface PreparedRoutingState {
@@ -145,6 +187,8 @@ function resolvePreparedProjectContext(
   const composeDefaults = projectType === "services"
     ? buildComposeDefaults(response, detectedStack)
     : undefined;
+  const monorepoApps = projectType === "monorepo" ? buildMonorepoApps(response) : undefined;
+  const monorepoWorkspace = projectType === "monorepo" ? buildMonorepoWorkspace(response) : undefined;
 
   return {
     projectType,
@@ -155,6 +199,8 @@ function resolvePreparedProjectContext(
     singleStackDef,
     composeDefaults,
     preparedOptions: composeDefaults?.options ?? buildPreparedOptions(response),
+    monorepoApps,
+    monorepoWorkspace,
   };
 }
 
@@ -371,6 +417,8 @@ export function useDeploymentConfig() {
         serviceDeploymentMode: preparedContext.serviceDeploymentMode,
         composeDefaults: preparedContext.composeDefaults,
         singleAppCandidate: preparedContext.singleAppCandidate,
+        monorepoApps: preparedContext.monorepoApps,
+        monorepoWorkspace: preparedContext.monorepoWorkspace,
         modeSnapshots: undefined,
         framework: preparedContext.detectedStack,
         detectedFramework: preparedContext.detectedStack,

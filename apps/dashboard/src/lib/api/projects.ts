@@ -60,6 +60,30 @@ export const projectsApi = {
     }>;
     hasServer?: boolean;
     hasBuild?: boolean;
+    /** Project flavor — "monorepo" persists the sub-app + workspace fields below. */
+    projectType?: "app" | "docker" | "services" | "monorepo";
+    monorepoApps?: Array<{
+      name: string;
+      rootDirectory: string;
+      framework?: string;
+      packageManager?: string;
+      buildImage?: string;
+      installCommand?: string;
+      buildCommand?: string;
+      startCommand?: string;
+      outputDirectory?: string;
+      port?: number;
+      enabled?: boolean;
+      exposed?: boolean;
+      domain?: string;
+      customDomain?: string;
+      domainType?: "free" | "custom";
+      environment?: Record<string, string>;
+    }>;
+    monorepoWorkspace?: {
+      packageManager: string;
+      installCommand?: string;
+    };
   }) => api.post<any>(endpoints.projects.ensure, body),
 
   /** List local projects only */

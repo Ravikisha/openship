@@ -122,7 +122,7 @@ export type StackCategory = "frontend" | "backend" | "fullstack" | "static" | "d
 
 // ─── Project type (determines deploy-page UI path) ──────────────────────────
 
-export type ProjectType = "app" | "docker" | "services";
+export type ProjectType = "app" | "docker" | "services" | "monorepo";
 
 // ─── Stack definition ────────────────────────────────────────────────────────
 

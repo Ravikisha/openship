@@ -18,6 +18,7 @@ import {
   User,
   KeyRound,
   Shield,
+  Mail,
 } from "lucide-react";
 import { getApiErrorMessage, isAbortError, systemApi } from "@/lib/api";
 import { useToast } from "@/context/ToastContext";
@@ -29,18 +30,40 @@ import type { ServerInfo, ComponentStatus, SetupComponentProgress, SetupLogEvent
 import { OverviewTab } from "./_components/overview-tab";
 import { ComponentsTab } from "./_components/components-tab";
 import { TerminalTab } from "./_components/terminal-tab";
+import { MailTab } from "./_components/mail-tab";
 
 import { RateLimitSettings } from "./_components/rate-limit-settings";
 
-type Tab = "overview" | "components" | "security" | "terminal";
+type Tab = "overview" | "components" | "mail" | "security" | "terminal";
 type ManualActionMode = "remove" | null;
 
-const TABS: { key: Tab; label: string; icon: React.ElementType }[] = [
-  { key: "overview", label: "Overview", icon: LayoutGrid },
-  { key: "components", label: "Components", icon: Blocks },
-  { key: "security", label: "Security", icon: Shield },
-  { key: "terminal", label: "Terminal", icon: Terminal },
+interface TabDef {
+  key: Tab;
+  label: string;
+  icon: React.ElementType;
+  /**
+   * Predicate against the server row. Returns false → tab hidden.
+   * Defaults to "always visible".
+   */
+  visibleFor?: (server: ServerInfo) => boolean;
+}
+
+const TABS: TabDef[] = [
+  { key: "overview",   label: "Overview",   icon: LayoutGrid },
+  // Components is openship's stack (Docker / git / rsync / OpenResty / certbot).
+  // Irrelevant on mail-only servers — the mail stack brings its own daemons.
+  { key: "components", label: "Components", icon: Blocks,    visibleFor: (s) => s.runsApps },
+  // Mail tab only shows for servers configured to run a mail server.
+  { key: "mail",       label: "Mail",       icon: Mail,      visibleFor: (s) => s.runsMail },
+  { key: "security",   label: "Security",   icon: Shield },
+  { key: "terminal",   label: "Terminal",   icon: Terminal },
 ];
+
+/** Filter the TABS list down to what's visible for this server. */
+function visibleTabsFor(server: ServerInfo | null): TabDef[] {
+  if (!server) return TABS.filter((t) => !t.visibleFor);
+  return TABS.filter((t) => !t.visibleFor || t.visibleFor(server));
+}
 
 export default function ServerDetailPage({
   params,
@@ -58,6 +81,17 @@ export default function ServerDetailPage({
   const [checkError, setCheckError] = useState<string | null>(null);
   const [installLogs, setInstallLogs] = useState<SetupLogEvent[]>([]);
   const [activeTab, setActiveTab] = useState<Tab>("overview");
+
+  // If the current tab is hidden for this server's capability set
+  // (e.g. user navigates from an apps server to a mail-only one while
+  // "components" is active), snap to the first visible tab.
+  useEffect(() => {
+    if (!server) return;
+    const visible = visibleTabsFor(server);
+    if (!visible.some((t) => t.key === activeTab)) {
+      setActiveTab(visible[0]?.key ?? "overview");
+    }
+  }, [server, activeTab]);
   const [showMenu, setShowMenu] = useState(false);
   const [isRemoving, setIsRemoving] = useState(false);
   const [activeActionComponent, setActiveActionComponent] = useState<string | null>(null);
@@ -104,6 +138,11 @@ export default function ServerDetailPage({
       setLoading(true);
       const s = await systemApi.getServerById(serverId);
       setServer(s);
+      // Mail-only servers should land on the Mail tab — Overview shows
+      // monitoring stats that depend on the app component stack.
+      if (s && s.runsMail && !s.runsApps) {
+        setActiveTab((prev) => (prev === "overview" ? "mail" : prev));
+      }
     } catch {
       setServer(null);
     } finally {
@@ -479,7 +518,7 @@ export default function ServerDetailPage({
           <div className="min-w-0">
             {/* Tabs */}
             <div className="flex items-center gap-1 mb-6 border-b border-border/50">
-              {TABS.map(({ key, label, icon: Icon }) => (
+              {visibleTabsFor(server).map(({ key, label, icon: Icon }) => (
                 <button
                   key={key}
                   onClick={() => setActiveTab(key)}
@@ -534,6 +573,10 @@ export default function ServerDetailPage({
                   setManualActionFinalStatus(null);
                 }}
               />
+            )}
+
+            {activeTab === "mail" && server?.runsMail && (
+              <MailTab serverId={serverId} runsApps={server.runsApps} />
             )}
 
             {activeTab === "security" && (

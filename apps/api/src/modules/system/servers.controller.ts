@@ -9,6 +9,7 @@ import { repos } from "@repo/db";
 import { invalidateOpenRestyPaths } from "@/lib/openresty-paths";
 import { env } from "../../config";
 import { sshManager } from "../../lib/ssh-manager";
+import { encryptSecretField } from "@/lib/credential-encryption";
 
 /** Guard — returns 404 in cloud mode (defense-in-depth) */
 function assertNotCloud(c: Context): boolean {
@@ -20,26 +21,49 @@ function assertNotCloud(c: Context): boolean {
   return true;
 }
 
+/**
+ * Coerce a request body's `runsApps` / `runsMail` field to a boolean,
+ * preserving the schema defaults (apps=true, mail=false) when unset.
+ *
+ * Both flags can be true on the same row — that's a small self-hosted setup
+ * running apps + iRedMail side by side. At least one must be true; the
+ * controller enforces that below.
+ */
+function coerceBool(input: unknown, fallback: boolean): boolean {
+  if (typeof input === "boolean") return input;
+  if (typeof input === "string") {
+    const v = input.trim().toLowerCase();
+    if (v === "true" || v === "yes" || v === "1") return true;
+    if (v === "false" || v === "no" || v === "0") return false;
+  }
+  return fallback;
+}
+
+/** Public shape — what the controller returns to clients (no SSH secrets). */
+function serializeServer(s: Awaited<ReturnType<typeof repos.server.get>>) {
+  if (!s) return null;
+  return {
+    id: s.id,
+    name: s.name,
+    runsApps: s.runsApps ?? true,
+    runsMail: s.runsMail ?? false,
+    sshHost: s.sshHost,
+    sshPort: s.sshPort,
+    sshUser: s.sshUser,
+    sshAuthMethod: s.sshAuthMethod,
+    sshKeyPath: s.sshKeyPath,
+    sshJumpHost: s.sshJumpHost,
+    sshArgs: s.sshArgs,
+    createdAt: s.createdAt,
+  };
+}
+
 /** GET /servers — list all servers */
 export async function listServers(c: Context) {
   if (!assertNotCloud(c)) return c.res;
 
   const all = await repos.server.list();
-
-  return c.json(
-    all.map((s) => ({
-      id: s.id,
-      name: s.name,
-      sshHost: s.sshHost,
-      sshPort: s.sshPort,
-      sshUser: s.sshUser,
-      sshAuthMethod: s.sshAuthMethod,
-      sshKeyPath: s.sshKeyPath,
-      sshJumpHost: s.sshJumpHost,
-      sshArgs: s.sshArgs,
-      createdAt: s.createdAt,
-    })),
-  );
+  return c.json(all.map(serializeServer));
 }
 
 /** GET /servers/:id — get a single server */
@@ -50,18 +74,7 @@ export async function getServer(c: Context) {
   const server = await repos.server.get(id);
   if (!server) return c.json({ error: "Server not found" }, 404);
 
-  return c.json({
-    id: server.id,
-    name: server.name,
-    sshHost: server.sshHost,
-    sshPort: server.sshPort,
-    sshUser: server.sshUser,
-    sshAuthMethod: server.sshAuthMethod,
-    sshKeyPath: server.sshKeyPath,
-    sshJumpHost: server.sshJumpHost,
-    sshArgs: server.sshArgs,
-    createdAt: server.createdAt,
-  });
+  return c.json(serializeServer(server));
 }
 
 /** POST /servers — create a new server */
@@ -73,15 +86,28 @@ export async function createServer(c: Context) {
   const host = (body.sshHost as string)?.trim();
   if (!host) return c.json({ error: "SSH host is required" }, 400);
 
+  const runsApps = coerceBool(body.runsApps, true);
+  const runsMail = coerceBool(body.runsMail, false);
+  if (!runsApps && !runsMail) {
+    return c.json(
+      { error: "A server must run at least one of apps or mail." },
+      400,
+    );
+  }
+
   const server = await repos.server.create({
     name: body.name?.trim() || null,
+    runsApps,
+    runsMail,
     sshHost: host,
     sshPort: body.sshPort ?? 22,
     sshUser: body.sshUser?.trim() || "root",
     sshAuthMethod: body.sshAuthMethod || null,
-    sshPassword: body.sshPassword || null,
+    // Encrypted at rest with AES-256-GCM (key derived from BETTER_AUTH_SECRET).
+    // Decrypted only inside `buildSshConfig` when the ssh2 client needs it.
+    sshPassword: encryptSecretField(body.sshPassword),
     sshKeyPath: body.sshKeyPath || null,
-    sshKeyPassphrase: body.sshKeyPassphrase || null,
+    sshKeyPassphrase: encryptSecretField(body.sshKeyPassphrase),
     sshJumpHost: body.sshJumpHost?.trim() || null,
     sshArgs: body.sshArgs?.trim() || null,
   });
@@ -89,14 +115,7 @@ export async function createServer(c: Context) {
   sshManager.invalidate(server.id);
   invalidateOpenRestyPaths(server.id);
 
-  return c.json({
-    id: server.id,
-    name: server.name,
-    sshHost: server.sshHost,
-    sshPort: server.sshPort,
-    sshUser: server.sshUser,
-    sshAuthMethod: server.sshAuthMethod,
-  }, 201);
+  return c.json(serializeServer(server), 201);
 }
 
 /** PATCH /servers/:id — update a server */
@@ -111,13 +130,25 @@ export async function updateServer(c: Context) {
   const patch: Record<string, unknown> = {};
 
   if (body.name !== undefined) patch.name = body.name?.trim() || null;
+  if (body.runsApps !== undefined) patch.runsApps = coerceBool(body.runsApps, existing.runsApps);
+  if (body.runsMail !== undefined) patch.runsMail = coerceBool(body.runsMail, existing.runsMail);
+  // Guard: at least one capability must be true after the update.
+  const nextRunsApps = patch.runsApps ?? existing.runsApps;
+  const nextRunsMail = patch.runsMail ?? existing.runsMail;
+  if (!nextRunsApps && !nextRunsMail) {
+    return c.json(
+      { error: "A server must run at least one of apps or mail." },
+      400,
+    );
+  }
   if (body.sshHost !== undefined) patch.sshHost = body.sshHost?.trim() || existing.sshHost;
   if (body.sshPort !== undefined) patch.sshPort = body.sshPort ?? 22;
   if (body.sshUser !== undefined) patch.sshUser = body.sshUser?.trim() || "root";
   if (body.sshAuthMethod !== undefined) patch.sshAuthMethod = body.sshAuthMethod || null;
-  if (body.sshPassword !== undefined) patch.sshPassword = body.sshPassword || null;
+  // Sensitive fields are encrypted at rest; see lib/credential-encryption.
+  if (body.sshPassword !== undefined) patch.sshPassword = encryptSecretField(body.sshPassword);
   if (body.sshKeyPath !== undefined) patch.sshKeyPath = body.sshKeyPath || null;
-  if (body.sshKeyPassphrase !== undefined) patch.sshKeyPassphrase = body.sshKeyPassphrase || null;
+  if (body.sshKeyPassphrase !== undefined) patch.sshKeyPassphrase = encryptSecretField(body.sshKeyPassphrase);
   if (body.sshJumpHost !== undefined) patch.sshJumpHost = body.sshJumpHost?.trim() || null;
   if (body.sshArgs !== undefined) patch.sshArgs = body.sshArgs?.trim() || null;
 
@@ -129,14 +160,7 @@ export async function updateServer(c: Context) {
   sshManager.invalidate(id);
   invalidateOpenRestyPaths(id);
 
-  return c.json({
-    id: updated.id,
-    name: updated.name,
-    sshHost: updated.sshHost,
-    sshPort: updated.sshPort,
-    sshUser: updated.sshUser,
-    sshAuthMethod: updated.sshAuthMethod,
-  });
+  return c.json(serializeServer(updated));
 }
 
 /** DELETE /servers/:id — delete a server */

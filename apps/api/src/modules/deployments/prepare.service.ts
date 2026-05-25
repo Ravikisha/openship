@@ -10,10 +10,13 @@ import { MANIFEST_FILES, type RepoFile, type StackResult } from "../../lib/stack
 import { parseComposeEnvFile, parseComposeFile, type ComposeService } from "../../lib/compose-parser";
 import {
   applyWorkspaceContext,
+  discoverMonorepoApps,
   discoverProjectRootHints,
   isIgnoredRepoPath,
   normalizeProjectRootDirectory,
   selectPreferredProjectRoot,
+  type MonorepoApp,
+  type MonorepoWorkspace,
   type ProjectRootSnapshot,
   type ProjectRootSnapshotInput,
   type RepoTreeEntry,
@@ -71,6 +74,8 @@ export interface ProjectInfo {
   productionPaths: string[];
   port: number;
   services?: ComposeService[];
+  monorepoApps?: MonorepoApp[];
+  monorepoWorkspace?: MonorepoWorkspace;
   rootEnv?: Record<string, string>;
 }
 
@@ -122,10 +127,15 @@ async function loadCandidateSnapshot(
   return snapshot;
 }
 
+interface SelectedProjectSnapshot {
+  selected: ProjectRootSnapshot;
+  monorepo: { apps: MonorepoApp[]; workspace: MonorepoWorkspace } | null;
+}
+
 async function selectProjectSnapshot(
   reader: ProjectReader,
   rootSnapshot: ProjectRootSnapshotInput,
-): Promise<ProjectRootSnapshot> {
+): Promise<SelectedProjectSnapshot> {
   const treeEntries = await reader.listTree().catch(() => [] as RepoTreeEntry[]);
   const hints = discoverProjectRootHints(
     treeEntries,
@@ -137,10 +147,13 @@ async function selectProjectSnapshot(
     hints.map((hint) => loadCandidateSnapshot(reader, hint.rootDirectory, hint.source)),
   )).filter((candidate): candidate is ProjectRootSnapshotInput => Boolean(candidate));
 
-  return applyWorkspaceContext(
+  const selected = applyWorkspaceContext(
     rootSnapshot,
     selectPreferredProjectRoot(rootSnapshot, candidates),
   );
+  const monorepo = discoverMonorepoApps(rootSnapshot, candidates);
+
+  return { selected, monorepo };
 }
 
 function createGitHubReader(
@@ -319,13 +332,13 @@ async function resolveFromReader(
   selectedBranch: string,
 ): Promise<ProjectInfo> {
   const rootSnapshot = await readProjectSnapshot(reader);
-  const selectedProject = await selectProjectSnapshot(reader, rootSnapshot);
+  const { selected, monorepo } = await selectProjectSnapshot(reader, rootSnapshot);
   const [composeContent, composeEnvContent] = await Promise.all([
-    readComposeText(reader, selectedProject.rootDirectory, selectedProject.files),
-    readProjectText(reader, selectedProject.rootDirectory, ".env"),
+    readComposeText(reader, selected.rootDirectory, selected.files),
+    readProjectText(reader, selected.rootDirectory, ".env"),
   ]);
 
-  return toProjectInfo(repoMeta, selectedProject, composeContent, selectedBranch, composeEnvContent);
+  return toProjectInfo(repoMeta, selected, composeContent, selectedBranch, composeEnvContent, monorepo);
 }
 
 // ─── GitHub ──────────────────────────────────────────────────────────────────
@@ -399,6 +412,7 @@ function toProjectInfo(
   composeContent?: string,
   selectedBranch?: string,
   composeEnvContent?: string,
+  monorepo?: { apps: MonorepoApp[]; workspace: MonorepoWorkspace } | null,
 ): ProjectInfo {
   const stack = projectRoot.stack;
   const rootEnv = composeEnvContent ? parseComposeEnvFile(composeEnvContent) : {};
@@ -413,6 +427,13 @@ function toProjectInfo(
     }
   }
 
+  // Monorepo wins over the single-root projectType: when the root has a workspace
+  // manifest AND we found 2+ deployable apps, expose the multi-app flow. The
+  // `selected` root is kept for backwards compatibility (single-app fallback if
+  // the user chooses to deploy just one).
+  const isMonorepo = !services && monorepo && monorepo.apps.length >= 2;
+  const projectType: ProjectType = isMonorepo ? "monorepo" : stack.projectType;
+
   return {
     repository: {
       name: repo.name,
@@ -426,7 +447,7 @@ function toProjectInfo(
       branches: repo.branches,
     },
     stack: stack.stack,
-    projectType: stack.projectType,
+    projectType,
     category: stack.category,
     packageManager: stack.packageManager,
     buildCommand: stack.buildCommand,
@@ -438,6 +459,9 @@ function toProjectInfo(
     productionPaths: stack.productionPaths,
     port: stack.port,
     ...(services && { services }),
+    ...(isMonorepo && monorepo
+      ? { monorepoApps: monorepo.apps, monorepoWorkspace: monorepo.workspace }
+      : {}),
     ...(Object.keys(rootEnv).length > 0 && { rootEnv }),
   };
 }

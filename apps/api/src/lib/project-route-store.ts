@@ -1,10 +1,13 @@
 import { repos, type Domain } from "@repo/db";
 import { ConflictError } from "@repo/core";
+import { CloudRuntime } from "@repo/adapters";
 import {
   normalizeStoredPublicEndpoints,
   publicEndpointHostname,
   type StoredPublicEndpoint,
 } from "./public-endpoints";
+import { platform } from "./controller-helpers";
+import { getRoutingBaseDomain } from "./routing-domains";
 
 interface SyncProjectPublicRoutesInput {
   projectId: string;
@@ -18,6 +21,56 @@ interface DesiredProjectRoute {
   targetPath?: string;
   domainType: "free" | "custom";
   isPrimary: boolean;
+}
+
+/**
+ * If `hostname` is a managed `<slug>.<baseDomain>` (e.g. business-servio.opsh.io),
+ * return the slug. Otherwise null — custom domains aren't Oblien-issued.
+ */
+function managedSlug(hostname: string): string | null {
+  const base = getRoutingBaseDomain().toLowerCase();
+  const suffix = `.${base}`;
+  const normalized = hostname.trim().toLowerCase();
+  if (!normalized.endsWith(suffix)) return null;
+  const slug = normalized.slice(0, -suffix.length);
+  return slug.length > 0 ? slug : null;
+}
+
+/**
+ * Ask Oblien whether a managed slug is free. Source of truth for `*.opsh.io`
+ * subdomains. Returns true/false on a definitive answer, null if we can't
+ * reach Oblien — callers treat null as "fall back to local DB".
+ */
+async function checkManagedSlugAvailable(hostname: string): Promise<boolean | null> {
+  const slug = managedSlug(hostname);
+  if (!slug) return null;
+
+  const runtime = platform().runtime;
+  if (!(runtime instanceof CloudRuntime)) return null;
+
+  try {
+    const result = await runtime.checkSlug(slug, getRoutingBaseDomain());
+    return result.available;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `findByHostname` finds rows regardless of project state. If the conflicting
+ * row belongs to a soft-deleted project, treat it as an orphan: hard-delete it
+ * and report no conflict, so the redeploy can proceed.
+ */
+async function resolveLocalConflict(domainRow: Domain, projectId: string): Promise<Domain | null> {
+  if (domainRow.projectId === projectId) return domainRow;
+
+  const owner = await repos.project.findById(domainRow.projectId);
+  if (!owner) {
+    // Project gone entirely — orphan row, drop it.
+    await repos.domain.remove(domainRow.id);
+    return null;
+  }
+  return domainRow;
 }
 
 function desiredProjectRoutes(endpoints?: StoredPublicEndpoint[] | null): DesiredProjectRoute[] {
@@ -64,12 +117,23 @@ export async function syncProjectPublicRoutes(
     if (!existing) {
       const globalExisting = await repos.domain.findByHostname(route.hostname);
       if (globalExisting) {
-        if (globalExisting.projectId !== input.projectId) {
+        const resolved = await resolveLocalConflict(globalExisting, input.projectId);
+        if (resolved && resolved.projectId !== input.projectId) {
           throw new ConflictError(`Domain "${route.hostname}" is already in use`);
         }
+        if (resolved) {
+          existing = resolved;
+          existingByHostname.set(route.hostname, resolved);
+        }
+      }
+    }
 
-        existing = globalExisting;
-        existingByHostname.set(route.hostname, globalExisting);
+    // For Oblien-managed slugs (e.g. *.opsh.io), Oblien is the source of truth.
+    // If local DB looks free but Oblien says taken, surface the real conflict.
+    if (!existing) {
+      const oblienAvailable = await checkManagedSlugAvailable(route.hostname);
+      if (oblienAvailable === false) {
+        throw new ConflictError(`Domain "${route.hostname}" is already in use`);
       }
     }
 
@@ -92,11 +156,27 @@ export async function syncProjectPublicRoutes(
         if (err?.cause?.code === "23505" || err?.code === "23505") {
           const conflicting = await repos.domain.findByHostname(route.hostname);
           if (conflicting) {
-            if (conflicting.projectId !== input.projectId) {
+            const resolved = await resolveLocalConflict(conflicting, input.projectId);
+            if (resolved && resolved.projectId !== input.projectId) {
               throw new ConflictError(`Domain "${route.hostname}" is already in use`);
             }
-
-            created = conflicting;
+            if (resolved) {
+              created = resolved;
+            } else {
+              // Orphan removed — retry the insert once.
+              created = await repos.domain.create({
+                projectId: input.projectId,
+                serviceId: null,
+                hostname: route.hostname,
+                targetPort: route.targetPort,
+                targetPath: route.targetPath,
+                domainType: route.domainType,
+                isPrimary: route.isPrimary,
+                status: "active",
+                verified: true,
+                verifiedAt: new Date(),
+              });
+            }
           } else {
             throw err;
           }

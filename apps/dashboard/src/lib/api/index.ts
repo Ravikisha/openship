@@ -39,15 +39,36 @@ export type { CloudStatus } from "./cloud";
 export { servicesApi } from "./services";
 export type { Service, ServiceContainer, ServiceEnvVar, ServiceInput } from "./services";
 export { mailApi } from "./mail";
+export { mailAdminApi } from "./mail-admin";
+export type {
+  AdminDomain,
+  AdminMailbox,
+  CreateDomainPayload,
+  UpdateDomainPayload,
+  CreateMailboxPayload,
+  UpdateMailboxPayload,
+  DomainDependents,
+  MailServerStats,
+  DnsCheck,
+  DnsCheckStatus,
+  DnsScanResult,
+} from "./mail-admin";
 export type {
   MailSetupStep,
   MailStepStatus,
   MailSetupStatus,
+  MailCredentials,
+  DnsRecord,
   DnsRecords,
   MailSSEEvent,
   PortConflict,
   PortResolution,
   PortUsage,
+  MailComponentHealth,
+  MailComponentStatus,
+  MailComponentDef,
+  MailHealthResponse,
+  Branding,
 } from "./mail";
 
 /* --- Auth helpers -------------------------------------------------- */

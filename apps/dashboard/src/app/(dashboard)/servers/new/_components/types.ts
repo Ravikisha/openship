@@ -1,7 +1,7 @@
 import type { ComponentStatus } from "@/lib/api/system";
 
 export type SetupMode = "auto" | "manual" | null;
-export type Step = "choose" | "checking" | "results" | "installing";
+export type Step = "capability" | "choose" | "checking" | "results" | "installing";
 
 export interface ComponentState {
   name: string;

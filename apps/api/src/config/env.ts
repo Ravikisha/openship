@@ -102,6 +102,23 @@ const envSchema = z.object({
   /** Shared secret for Electron → API calls (set by desktop app on startup) */
   INTERNAL_TOKEN: z.string().optional(),
 
+  /* ---------- Mail webmail (Zero) ---------- */
+  /**
+   * Base URL of the Zero webmail server reachable from openship's API.
+   * The Zero server owns its branding storage and exposes
+   * `/branding.json` (public) + `/admin/branding` (token-auth). Openship
+   * proxies dashboard branding writes here. Can be on the same VPS as
+   * iRedMail, on a separate host, or even cross-region — wherever the
+   * operator runs Zero.
+   */
+  MAIL_WEBMAIL_URL: z.string().default("http://localhost:3030"),
+  /**
+   * Shared secret matching the Zero server's `BRANDING_ADMIN_TOKEN`.
+   * Sent as `X-Branding-Admin-Token` on writes. Never reaches the
+   * browser; openship API holds it, dashboard talks to openship.
+   */
+  MAIL_WEBMAIL_ADMIN_TOKEN: z.string().optional(),
+
   /** Enables verbose timing logs for SSH/system checks and environment detection */
   SYSTEM_DEBUG_LOGS: z
     .enum(["true", "false", "1", "0", ""])

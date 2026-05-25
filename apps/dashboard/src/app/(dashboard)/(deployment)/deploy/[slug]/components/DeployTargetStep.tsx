@@ -216,7 +216,10 @@ export function useDesktopTargets(): ResolvedTargets {
 
     let cancelled = false;
     systemApi.listServers()
-      .then((list) => { if (!cancelled) setServers(list); })
+      // App deploys cannot target mail-only servers. Filter them out at the
+      // UI layer (the backend also refuses, but hiding the option in the
+      // picker is the clearer UX).
+      .then((list) => { if (!cancelled) setServers(list.filter((s) => s.runsApps)); })
       .catch(() => {})
       .finally(() => { if (!cancelled) setServersReady(true); });
     return () => { cancelled = true; };

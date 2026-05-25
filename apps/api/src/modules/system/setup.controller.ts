@@ -17,6 +17,7 @@ import { env } from "../../config";
 import { clearAuthModeCache } from "../../lib/auth-mode";
 import { normalizeRollbackWindow } from "../../lib/release-retention";
 import { sshManager } from "../../lib/ssh-manager";
+import { encryptSecretField } from "@/lib/credential-encryption";
 
 /** Guard — returns 404 in cloud mode (defense-in-depth) */
 function assertNotCloud(c: Context): boolean {
@@ -52,6 +53,11 @@ export async function setup(c: Context) {
       ? await repos.server.get(body.serverId)
       : (await repos.server.list())[0] ?? null;
 
+    // Encrypt SSH secrets at rest. Decrypted only inside `buildSshConfig`
+    // when the ssh2 client needs them. See lib/credential-encryption.
+    const encryptedPassword = encryptSecretField(body.sshPassword);
+    const encryptedKeyPassphrase = encryptSecretField(body.sshKeyPassphrase);
+
     if (existing) {
       await repos.server.update(existing.id, {
         name: body.serverName || null,
@@ -59,9 +65,9 @@ export async function setup(c: Context) {
         sshPort: body.sshPort || 22,
         sshUser: body.sshUser || "root",
         sshAuthMethod: body.sshAuthMethod || null,
-        sshPassword: body.sshPassword || null,
+        sshPassword: encryptedPassword,
         sshKeyPath: body.sshKeyPath || null,
-        sshKeyPassphrase: body.sshKeyPassphrase || null,
+        sshKeyPassphrase: encryptedKeyPassphrase,
         sshJumpHost: body.sshJumpHost || null,
         sshArgs: body.sshArgs || null,
       });
@@ -73,9 +79,9 @@ export async function setup(c: Context) {
         sshPort: body.sshPort || 22,
         sshUser: body.sshUser || "root",
         sshAuthMethod: body.sshAuthMethod || null,
-        sshPassword: body.sshPassword || null,
+        sshPassword: encryptedPassword,
         sshKeyPath: body.sshKeyPath || null,
-        sshKeyPassphrase: body.sshKeyPassphrase || null,
+        sshKeyPassphrase: encryptedKeyPassphrase,
         sshJumpHost: body.sshJumpHost || null,
         sshArgs: body.sshArgs || null,
       });

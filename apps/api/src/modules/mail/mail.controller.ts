@@ -1,24 +1,41 @@
 /**
- * Mail setup controller — exposes HTTP endpoints for the mail server
- * setup wizard.  Self-hosted only (gated with localOnly + authMiddleware).
+ * Mail setup controller — HTTP endpoints for the iRedMail setup wizard.
+ *
+ * Self-hosted only (mounted behind `localOnly` + `authMiddleware`).
  *
  * Endpoints:
- *   GET  /mail/steps             → list all setup steps
- *   GET  /mail/status            → current setup progress
- *   POST /mail/setup             → start or resume setup (SSE stream)
- *   POST /mail/setup/cancel      → cancel running setup
- *   POST /mail/ports/check       → standalone port 80/443 scan
- *   POST /mail/ports/resolve     → resolve a detected port conflict
+ *   GET  /mail/steps                → list all setup steps
+ *   GET  /mail/status?serverId=…    → current setup progress for a server
+ *   POST /mail/setup                → start or resume setup (SSE stream)
+ *   POST /mail/setup/cancel         → cancel running setup
+ *   POST /mail/setup/dns-ack        → flip the DKIM gate flag
+ *   POST /mail/setup/reset          → wipe the on-server state file
+ *   GET  /mail/health/:serverId     → live systemd status of mail daemons
+ *
+ * State model:
+ *   - Durable state ("what HAS been installed") lives on the target VPS at
+ *     /root/.openship-mail-state.json. Purge the VPS, state goes with it.
+ *   - Ephemeral state ("is an install running RIGHT NOW") lives as one
+ *     `activeSession` variable in this process. Lost on API restart, which
+ *     is fine — if openship restarts mid-install, the on-server state file
+ *     still has the completed steps, the SSE caller can retry from where
+ *     it left off via the regular Resume button.
+ *
+ * No openship DB tables involved.
  */
 
 import type { Context } from "hono";
+import { lookup as dnsLookup } from "node:dns/promises";
 import { streamSSE } from "../../lib/sse";
 import { env } from "../../config";
 import { sshManager } from "../../lib/ssh-manager";
+import { repos } from "@repo/db";
 import {
   MAIL_SETUP_STEPS,
   TOTAL_STEPS,
   STEP_RUNNERS,
+  STEP_TIMEOUT_MS,
+  DEFAULT_STEP_TIMEOUT_MS,
   type StepResult,
   type StepLogger,
   type BasicStepFn,
@@ -26,52 +43,60 @@ import {
   type InstallerStepFn,
   type IRedMailConfig,
 } from "./mail.service";
+import { checkMailHealth, MAIL_COMPONENTS } from "./mail-health.service";
+import { updatePostmasterPassword } from "./mail-credentials.service";
 import {
-  detectPortConflicts,
-  resolveConflict,
-  type PortConflict,
-} from "./port-manager";
+  readState,
+  writeState,
+  clearState,
+  makeFreshState,
+  recordStep,
+  mergeSecrets,
+  appendLog,
+  type MailServerState,
+  type MailSessionLogLine,
+} from "./mail-state";
 
-// ─── In-memory session (single-tenant, self-hosted) ──────────────────────────
+// ─── In-memory pointer to the currently-running install ──────────────────────
 
-interface MailSetupSession {
-  running: boolean;
+/**
+ * One install at a time per process. Tracked in memory only because
+ * "running" is a process-local thing — the durable record of "step 8
+ * completed" lives in the on-server JSON file.
+ */
+interface ActiveSession {
   serverId: string;
   domain: string;
-  currentStep: number;
-  startedAt: number;
-  completedSteps: Map<number, StepResult>;
   cancelled: boolean;
-  finishedAt?: number;
-  /** DNS records returned by step 11 (dkim_keys) */
-  dnsRecords?: Record<string, unknown>;
 }
 
-let session: MailSetupSession | null = null;
+let active: ActiveSession | null = null;
 
-// ─── Handlers ────────────────────────────────────────────────────────────────
+// ─── Status rendering ────────────────────────────────────────────────────────
 
-/** GET /mail/steps — list all setup steps with metadata */
-export async function getSteps(c: Context) {
-  if (env.CLOUD_MODE) return c.json({ error: "Not available" }, 404);
-  return c.json({ steps: MAIL_SETUP_STEPS, total: TOTAL_STEPS });
-}
-
-/** GET /mail/status — current setup status */
-export async function getStatus(c: Context) {
-  if (env.CLOUD_MODE) return c.json({ error: "Not available" }, 404);
-
-  if (!session) {
-    return c.json({ active: false, steps: MAIL_SETUP_STEPS });
+/**
+ * Render an on-server state object into the dashboard-facing payload.
+ * The frontend type is the same as before — we just synthesise it from
+ * the persistent state plus the in-memory `active` pointer.
+ */
+function statusFromState(state: MailServerState | null, serverId: string) {
+  if (!state) {
+    return {
+      active: false,
+      serverId,
+      steps: MAIL_SETUP_STEPS.map((s) => ({ ...s, status: "pending" as const })),
+    };
   }
 
+  const isActive = active?.serverId === state.serverId;
+  const runningStep = isActive ? activeRunningStep(state) : null;
+
   const stepStatuses = MAIL_SETUP_STEPS.map((step) => {
-    const result = session!.completedSteps.get(step.id);
+    const result = state.completedSteps[String(step.id)];
     let status: "pending" | "running" | "completed" | "failed" | "skipped" = "pending";
     if (result?.success) status = "completed";
     else if (result && !result.success) status = "failed";
-    else if (session!.running && session!.currentStep === step.id) status = "running";
-    else if (result === undefined && step.id < session!.currentStep) status = "skipped";
+    else if (runningStep === step.id) status = "running";
 
     return {
       ...step,
@@ -82,16 +107,208 @@ export async function getStatus(c: Context) {
     };
   });
 
-  return c.json({
-    active: session.running,
-    serverId: session.serverId,
-    domain: session.domain,
-    currentStep: session.currentStep,
-    startedAt: session.startedAt,
-    finishedAt: session.finishedAt,
-    dnsRecords: session.dnsRecords,
+  // Surface ONLY the postmaster login. The rest of `state.secrets` is
+  // internal plumbing (Postgres root, vmail DB binds, etc.) — the operator
+  // doesn't need to see those in the dashboard, and shipping them across
+  // the wire just expands the attack surface.
+  const credentials =
+    state.secrets.DOMAIN_ADMIN_PASSWD_PLAIN
+      ? {
+          username: `postmaster@${state.domain}`,
+          password: state.secrets.DOMAIN_ADMIN_PASSWD_PLAIN,
+          smtpHost: `mail.${state.domain}`,
+          smtpPort: 587,
+          imapHost: `mail.${state.domain}`,
+          imapPort: 993,
+        }
+      : undefined;
+
+  return {
+    active: isActive,
+    serverId: state.serverId,
+    domain: state.domain,
+    currentStep: runningStep ?? deriveCurrentStep(state),
+    startedAt: Date.parse(state.startedAt),
+    finishedAt: state.finishedAt ? Date.parse(state.finishedAt) : undefined,
+    dnsRecords: state.dnsRecords ?? undefined,
+    dnsAcknowledged: state.dnsAcknowledged,
+    ptrAcknowledged: state.ptrAcknowledged ?? false,
+    credentials,
     steps: stepStatuses,
-  });
+    // Persisted log buffer — capped to MAX_PERSISTED_LOGS lines. Lets the
+    // dashboard restore the live-log panel on refresh instead of showing
+    // "logs will stream once setup starts" after every reload.
+    logs: state.logs ?? [],
+    resumeStep: state.resumeStep ?? undefined,
+    errorMessage: state.errorMessage ?? undefined,
+  };
+}
+
+/**
+ * Build the `ptr_pending` event payload from state. Pulls IPv4/IPv6 out
+ * of the A/AAAA DNS records (step 11 detected and stored them there)
+ * and pairs them with `mail.<domain>` as the PTR target.
+ *
+ * Returns null if there's no IPv4 to set PTR for — we don't gate on PTR
+ * if we couldn't even detect the IP, since the user can't act on it.
+ */
+function buildPtrPayload(
+  state: MailServerState,
+  resumeStep: number,
+): { ipv4: string; ipv6: string | null; target: string; resumeStep: number } | null {
+  const records = (state.dnsRecords ?? {}) as Record<
+    string,
+    { type?: unknown; value?: unknown }
+  >;
+  const a = records["a"];
+  const aaaa = records["aaaa"];
+  const ipv4 =
+    a && typeof a.value === "string" && a.type === "A" ? a.value : null;
+  const ipv6 =
+    aaaa && typeof aaaa.value === "string" && aaaa.type === "AAAA"
+      ? aaaa.value
+      : null;
+  if (!ipv4) return null;
+  return {
+    ipv4,
+    ipv6,
+    target: `mail.${state.domain}`,
+    resumeStep,
+  };
+}
+
+/** Step ID we'd resume from on retry — first step missing or failed. */
+function deriveCurrentStep(state: MailServerState): number {
+  for (const step of MAIL_SETUP_STEPS) {
+    const r = state.completedSteps[String(step.id)];
+    if (!r || !r.success) return step.id;
+  }
+  return TOTAL_STEPS;
+}
+
+function activeRunningStep(state: MailServerState): number {
+  return deriveCurrentStep(state);
+}
+
+// ─── Handlers ────────────────────────────────────────────────────────────────
+
+/** GET /mail/steps — list all setup steps with metadata */
+export async function getSteps(c: Context) {
+  if (env.CLOUD_MODE) return c.json({ error: "Not available" }, 404);
+  return c.json({ steps: MAIL_SETUP_STEPS, total: TOTAL_STEPS });
+}
+
+/**
+ * GET /mail/status?serverId=… — render the on-server state file as a status.
+ *
+ * If `serverId` is missing, returns the "no install" shell so the welcome
+ * form still works. If the server is unreachable or the state file is
+ * missing, returns "no install" — same shell.
+ */
+export async function getStatus(c: Context) {
+  if (env.CLOUD_MODE) return c.json({ error: "Not available" }, 404);
+
+  const serverId = c.req.query("serverId");
+  if (!serverId) {
+    return c.json({ active: false, steps: MAIL_SETUP_STEPS });
+  }
+
+  try {
+    let state = await sshManager.withExecutor(serverId, (executor) =>
+      readState(executor),
+    );
+    // Older state files (pre-IP-detection) don't carry A/AAAA records.
+    // Backfill from the server's sshHost so the DNS banner doesn't have
+    // a hole where the host records should be.
+    if (state) {
+      state = await augmentStateWithHostRecords(state, serverId);
+    }
+    return c.json(statusFromState(state, serverId));
+  } catch {
+    // SSH unreachable — treat as no-state. The dashboard handles this
+    // gracefully and shows the empty form.
+    return c.json({ active: false, serverId, steps: MAIL_SETUP_STEPS });
+  }
+}
+
+/**
+ * If the state file's `dnsRecords` is missing the `a` (and optionally
+ * `aaaa`) entries, derive them from openship's stored sshHost — either
+ * it's already an IP literal, or it's a hostname we resolve via DNS.
+ *
+ * This is a read-time augmentation only: we DON'T write back to the
+ * state file. The compute is cheap (an OS-level DNS lookup, or a
+ * regex check if sshHost is already an IP), and writing-on-read has
+ * surprising side effects we'd rather avoid.
+ */
+async function augmentStateWithHostRecords(
+  state: MailServerState,
+  serverId: string,
+): Promise<MailServerState> {
+  if (!state.dnsRecords) return state;
+  const records = state.dnsRecords as Record<string, unknown>;
+  if (records.a) return state; // already present
+
+  let server;
+  try {
+    server = await repos.server.get(serverId);
+  } catch {
+    return state;
+  }
+  if (!server?.sshHost) return state;
+
+  const { ipv4, ipv6 } = await resolveHostIPs(server.sshHost);
+  if (!ipv4) return state;
+
+  const mailDomain = `mail.${state.domain}`;
+  const augmented: Record<string, unknown> = {
+    a: { type: "A", name: mailDomain, value: ipv4, required: true },
+    ...(ipv6 && {
+      aaaa: {
+        type: "AAAA",
+        name: mailDomain,
+        value: ipv6,
+        required: false,
+      },
+    }),
+    ...records,
+  };
+
+  return { ...state, dnsRecords: augmented };
+}
+
+const IPV4_LITERAL = /^\d{1,3}(?:\.\d{1,3}){3}$/;
+
+/**
+ * Resolve a host (IP literal or hostname) to its IPv4 and IPv6
+ * addresses. Uses Node's OS-level DNS resolver — fast, no SSH needed.
+ *
+ * sshHost is typically the VPS's public IP (Hostinger / DO / etc.
+ * provision IPs and surface them directly). Sometimes it's a hostname
+ * like `srv1144965.hstgr.cloud`; either way, this returns the same
+ * address the rest of the world would resolve.
+ */
+async function resolveHostIPs(
+  host: string,
+): Promise<{ ipv4: string | null; ipv6: string | null }> {
+  // Already an IP — no resolution needed.
+  if (IPV4_LITERAL.test(host)) {
+    return { ipv4: host, ipv6: null };
+  }
+  if (host.includes(":") && /^[0-9a-f:]+$/i.test(host)) {
+    return { ipv4: null, ipv6: host };
+  }
+
+  // Hostname — resolve both families independently. allSettled so a
+  // missing AAAA doesn't kill the whole lookup.
+  const [v4, v6] = await Promise.allSettled([
+    dnsLookup(host, { family: 4 }),
+    dnsLookup(host, { family: 6 }),
+  ]);
+  return {
+    ipv4: v4.status === "fulfilled" ? v4.value.address : null,
+    ipv6: v6.status === "fulfilled" ? v6.value.address : null,
+  };
 }
 
 /**
@@ -103,8 +320,9 @@ export async function getStatus(c: Context) {
  *   - step_start    { stepId, key, label }
  *   - log           { stepId, level, message }
  *   - step_done     { stepId, success, message, warning?, data? }
- *   - port_conflict { portConflicts: PortConflict[] }
  *   - dns_records   { records }
+ *   - dns_pending   { records, resumeStep }   — DKIM hold gate
+ *   - ptr_pending   { ipv4, ipv6, target, resumeStep }   — VPS-provider PTR gate (after DNS ack)
  *   - complete      { success, domain, finishedAt }
  *   - error         { message, resumeStep? }
  */
@@ -120,45 +338,132 @@ export async function startSetup(c: Context) {
   if (!serverId) {
     return c.json({ error: "serverId is required" }, 400);
   }
-
   if (!domain || !/^[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(domain)) {
     return c.json({ error: "Invalid domain" }, 400);
   }
 
-  if (session?.running) {
+  if (active) {
     return c.json({ error: "Setup already running" }, 409);
   }
 
-  // Initialize session
-  session = {
-    running: true,
-    serverId,
-    domain,
-    currentStep: startStep,
-    startedAt: Date.now(),
-    completedSteps: new Map(),
-    cancelled: false,
-  };
+  active = { serverId, domain, cancelled: false };
 
   return streamSSE(c, async (stream) => {
+    // Resolve initial state from the server. New install → fresh state.
+    // Existing install on same domain → merge so secrets/completedSteps
+    // survive across retries. Different domain on same server → wipe and
+    // start over (we don't support two domains per server).
+    let state: MailServerState;
+    try {
+      const existing = await sshManager.withExecutor(serverId, (executor) =>
+        readState(executor),
+      );
+      if (existing && existing.domain === domain) {
+        state = {
+          ...existing,
+          finishedAt: null,
+          resumeStep: null,
+          errorMessage: null,
+        };
+      } else {
+        state = makeFreshState(serverId, domain);
+      }
+    } catch (err) {
+      await stream.writeSSE({
+        event: "error",
+        data: JSON.stringify({
+          message: `Could not read state from server: ${err instanceof Error ? err.message : "ssh error"}`,
+        }),
+      });
+      active = null;
+      return;
+    }
+
+    // Older state files (pre-log-persistence) may not have `logs`. Normalise
+    // here so subsequent code can treat `state.logs` as a mutable array
+    // without `?? []` everywhere.
+    if (!state.logs) {
+      state = { ...state, logs: [] };
+    }
+
     const log: StepLogger = (stepId, level, message) => {
+      // Append to the persisted buffer + push to the live SSE listener.
+      // appendLog caps the array at MAX_PERSISTED_LOGS — older lines fall
+      // off the front. The write to disk happens at step boundaries via
+      // `persist()`, not on every log line.
+      if (state.logs) {
+        appendLog(state.logs, stepId, level, message);
+      }
       stream
         .writeSSE({ event: "log", data: JSON.stringify({ stepId, level, message }) })
         .catch(() => {});
     };
 
+    /**
+     * Persist current state to the server. Called at every step boundary so a
+     * crash mid-run leaves the JSON pointing at the last completed step.
+     */
+    const persist = async () => {
+      await sshManager.withExecutor(serverId, (executor) =>
+        writeState(executor, state),
+      );
+    };
+
+    /** Halt-and-persist: marks run as not-running, optionally with a resume hint. */
+    const halt = async (extra: Partial<MailServerState>) => {
+      state = { ...state, finishedAt: extra.finishedAt ?? null, ...extra };
+      await persist();
+      active = null;
+    };
+
     try {
+      // Write the initial state so the dashboard's getStatus sees us
+      // as in-progress immediately, not "pending".
+      await persist();
+
+      // ── PTR gate ──────────────────────────────────────────────────
+      //
+      // Runs BEFORE the loop, so it fires when the user resumes from
+      // step 12+ with DNS acknowledged but PTR not yet. The flow is:
+      //   1. Step 11 emits dns_pending → user clicks "I've set DNS" →
+      //      ack endpoint flips dnsAcknowledged → resume with startStep=12
+      //   2. Pre-loop check below: dnsAck=true, ptrAck=false → emit
+      //      ptr_pending → halt
+      //   3. User clicks "I've set PTRs" → ack endpoint flips ptrAck →
+      //      resume with startStep=12 → pre-loop check passes → loop runs
+      //
+      // The `startStep > 11` guard prevents the gate from firing when
+      // the user resumes from an earlier step (e.g., step 7 transfer) —
+      // in that case the loop will re-run step 11 and re-issue dns_pending,
+      // which is the right order.
+      if (
+        startStep > 11 &&
+        state.dnsRecords &&
+        state.dnsAcknowledged &&
+        !state.ptrAcknowledged
+      ) {
+        const ptrPayload = buildPtrPayload(state, startStep);
+        if (ptrPayload) {
+          await stream.writeSSE({
+            event: "ptr_pending",
+            data: JSON.stringify(ptrPayload),
+          });
+          await halt({ resumeStep: startStep, errorMessage: null });
+          return;
+        }
+      }
+
       for (let stepId = startStep; stepId <= TOTAL_STEPS; stepId++) {
-        if (session?.cancelled) {
+        if (active?.cancelled) {
           await stream.writeSSE({
             event: "error",
             data: JSON.stringify({ message: "Setup cancelled by user" }),
           });
-          break;
+          await halt({ resumeStep: stepId, errorMessage: "Setup cancelled by user" });
+          return;
         }
 
         const stepDef = MAIL_SETUP_STEPS[stepId - 1];
-        session!.currentStep = stepId;
 
         await stream.writeSSE({
           event: "step_start",
@@ -167,64 +472,102 @@ export async function startSetup(c: Context) {
 
         let result: StepResult;
         const runner = STEP_RUNNERS[stepId];
+        const timeoutMs = STEP_TIMEOUT_MS[stepDef.key] ?? DEFAULT_STEP_TIMEOUT_MS;
 
         try {
-          // Key-based dispatch for steps with special signatures
-          if (stepDef.key === "first_reboot" || stepDef.key === "configure_ssl") {
-            const reconnectFn = async () => {
-              sshManager.invalidate(serverId);
-              return sshManager.acquire(serverId);
-            };
-            const executor = await sshManager.acquire(serverId);
-            result = await (runner as RebootStepFn)(executor, domain, log, reconnectFn);
-          } else if (stepDef.key === "run_installer") {
-            result = await sshManager.withExecutor(serverId, (executor) =>
-              (runner as InstallerStepFn)(executor, domain, log, config),
-            );
-          } else {
-            result = await sshManager.withExecutor(serverId, (executor) =>
+          // Race the step against a per-step timeout. The underlying SSH
+          // command keeps running on the server if it times out — we just
+          // surface a failure here so the wizard isn't stuck staring at
+          // silent output. The user can Retry (and on retry, the engine's
+          // status file may show the work as already done).
+          const runStep = (): Promise<StepResult> => {
+            if (stepDef.key === "first_reboot" || stepDef.key === "configure_ssl") {
+              const reconnectFn = async () => {
+                sshManager.invalidate(serverId);
+                return sshManager.acquire(serverId);
+              };
+              return sshManager
+                .acquire(serverId)
+                .then((executor) =>
+                  (runner as RebootStepFn)(executor, domain, log, reconnectFn),
+                );
+            }
+            if (stepDef.key === "run_installer") {
+              const installerConfig: IRedMailConfig = {
+                ...config,
+                prefillSecrets:
+                  Object.keys(state.secrets).length > 0 ? state.secrets : undefined,
+              };
+              return sshManager.withExecutor(serverId, (executor) =>
+                (runner as InstallerStepFn)(executor, domain, log, installerConfig),
+              );
+            }
+            return sshManager.withExecutor(serverId, (executor) =>
               (runner as BasicStepFn)(executor, domain, log),
             );
-          }
+          };
+
+          result = await Promise.race([
+            runStep(),
+            new Promise<StepResult>((_, reject) =>
+              setTimeout(
+                () =>
+                  reject(
+                    new Error(
+                      `Step "${stepDef.label}" timed out after ${Math.round(timeoutMs / 60_000)} min`,
+                    ),
+                  ),
+                timeoutMs,
+              ),
+            ),
+          ]);
         } catch (err) {
           const message = err instanceof Error ? err.message : "Step execution failed";
           result = { stepId, success: false, message };
           log(stepId, "error", message);
         }
 
-        session!.completedSteps.set(stepId, result);
+        state = recordStep(state, {
+          stepId: result.stepId,
+          success: result.success,
+          message: result.message,
+          warning: result.warning,
+          data: result.data,
+        });
+
+        // Installer step returns generated DB passwords — persist so
+        // retries reuse the same values iRedMail wrote into its configs.
+        if (stepDef.key === "run_installer" && result.data?.secrets) {
+          state = mergeSecrets(state, result.data.secrets as Record<string, string>);
+        }
 
         await stream.writeSSE({
           event: "step_done",
           data: JSON.stringify(result),
         });
 
-        // Port conflict detection — send detailed conflict data to frontend
-        if (stepDef.key === "check_web_ports" && !result.success && result.data?.portConflicts) {
-          await stream.writeSSE({
-            event: "port_conflict",
-            data: JSON.stringify({ portConflicts: result.data.portConflicts }),
-          });
-          // Stop — user must resolve conflicts before continuing
-          await stream.writeSSE({
-            event: "error",
-            data: JSON.stringify({
-              message: result.message,
-              resumeStep: stepId,
-            }),
-          });
-          session!.running = false;
-          session!.finishedAt = Date.now();
-          return;
-        }
-
-        // DKIM keys — broadcast DNS records separately
+        // DKIM step: broadcast records + hold-and-continue gate
         if (stepDef.key === "dkim_keys" && result.success && result.data?.dnsRecords) {
-          session!.dnsRecords = result.data.dnsRecords as Record<string, unknown>;
+          state = {
+            ...state,
+            dnsRecords: result.data.dnsRecords as Record<string, unknown>,
+          };
           await stream.writeSSE({
             event: "dns_records",
-            data: JSON.stringify({ records: result.data.dnsRecords }),
+            data: JSON.stringify({ records: state.dnsRecords }),
           });
+
+          if (!state.dnsAcknowledged) {
+            await stream.writeSSE({
+              event: "dns_pending",
+              data: JSON.stringify({
+                records: state.dnsRecords,
+                resumeStep: stepId + 1,
+              }),
+            });
+            await halt({ resumeStep: stepId + 1, errorMessage: null });
+            return;
+          }
         }
 
         if (!result.success) {
@@ -235,14 +578,16 @@ export async function startSetup(c: Context) {
               resumeStep: stepId,
             }),
           });
-          session!.running = false;
-          session!.finishedAt = Date.now();
+          await halt({ resumeStep: stepId, errorMessage: result.message });
           return;
         }
+
+        // Persist after every successful step so a crash leaves a coherent file.
+        await persist();
       }
 
-      session!.running = false;
-      session!.finishedAt = Date.now();
+      const finishedAt = new Date().toISOString();
+      await halt({ resumeStep: null, errorMessage: null, finishedAt });
 
       await stream.writeSSE({
         event: "complete",
@@ -250,7 +595,7 @@ export async function startSetup(c: Context) {
           success: true,
           domain,
           mailDomain: `mail.${domain}`,
-          finishedAt: session!.finishedAt,
+          finishedAt: Date.parse(finishedAt),
           webmailUrl: `https://mail.${domain}/mail`,
           adminUrl: `https://mail.${domain}/iredadmin`,
         }),
@@ -261,74 +606,194 @@ export async function startSetup(c: Context) {
         event: "error",
         data: JSON.stringify({ message }),
       });
-      if (session) {
-        session.running = false;
-        session.finishedAt = Date.now();
+      try {
+        await halt({ errorMessage: message });
+      } catch {
+        active = null;
       }
     }
   });
 }
 
-/** POST /mail/setup/cancel — cancel a running setup */
+/** POST /mail/setup/cancel — cancel the running setup */
 export async function cancelSetup(c: Context) {
   if (env.CLOUD_MODE) return c.json({ error: "Not available" }, 404);
 
-  if (!session?.running) {
+  if (!active) {
     return c.json({ error: "No active setup" }, 400);
   }
 
-  session.cancelled = true;
+  active.cancelled = true;
   return c.json({ ok: true, message: "Cancellation requested" });
 }
 
-// ─── Port conflict endpoints ─────────────────────────────────────────────────
-
-/** POST /mail/ports/check — standalone port scan for 80/443 */
-export async function checkPorts(c: Context) {
+/**
+ * POST /mail/setup/dns-ack — mark DNS records as configured on a session.
+ *
+ * Body: { serverId: string }
+ *
+ * Flips `dnsAcknowledged` in the on-server state file. The dashboard then
+ * re-POSTs to /mail/setup with `startStep = resumeStep` to resume past
+ * the DKIM hold.
+ */
+export async function acknowledgeDns(c: Context) {
   if (env.CLOUD_MODE) return c.json({ error: "Not available" }, 404);
 
   const body = await c.req.json().catch(() => ({}));
   const serverId = body.serverId as string | undefined;
-
-  if (!serverId) {
-    return c.json({ error: "serverId is required" }, 400);
-  }
+  if (!serverId) return c.json({ error: "serverId is required" }, 400);
 
   try {
-    const conflicts = await sshManager.withExecutor(serverId, (executor) =>
-      detectPortConflicts(executor),
-    );
-    return c.json({ conflicts, free: conflicts.length === 0 });
+    await sshManager.withExecutor(serverId, async (executor) => {
+      const state = await readState(executor);
+      if (!state) {
+        throw new Error("No setup state on this server");
+      }
+      await writeState(executor, { ...state, dnsAcknowledged: true });
+    });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Port check failed";
-    return c.json({ error: message }, 500);
+    return c.json(
+      { error: err instanceof Error ? err.message : "DNS acknowledge failed" },
+      400,
+    );
   }
+  return c.json({ ok: true });
 }
 
 /**
- * POST /mail/ports/resolve — resolve a specific port conflict.
+ * POST /mail/setup/ptr-ack — mark reverse-DNS (PTR) as configured.
  *
- * Body: { serverId: string, conflict: PortConflict, resolutionId: string }
+ * Body: { serverId: string }
+ *
+ * Same shape as the DNS ack — flips a bit on the on-server state file,
+ * then the dashboard re-POSTs to /mail/setup with the resume step to
+ * continue past the PTR gate.
+ *
+ * We deliberately don't verify the PTR with `dig -x` from openship's host:
+ * many VPS providers (Hostinger included) take 5-15 minutes to propagate
+ * rDNS changes, and blocking on that would frustrate users. If they lie
+ * about having set it, mail-to-Gmail just goes to spam — recoverable.
  */
-export async function resolvePorts(c: Context) {
+export async function acknowledgePtr(c: Context) {
   if (env.CLOUD_MODE) return c.json({ error: "Not available" }, 404);
 
   const body = await c.req.json().catch(() => ({}));
   const serverId = body.serverId as string | undefined;
-  const conflict = body.conflict as PortConflict | undefined;
-  const resolutionId = body.resolutionId as string | undefined;
+  if (!serverId) return c.json({ error: "serverId is required" }, 400);
 
-  if (!serverId || !conflict || !resolutionId) {
-    return c.json({ error: "Missing serverId, conflict, or resolutionId" }, 400);
+  try {
+    await sshManager.withExecutor(serverId, async (executor) => {
+      const state = await readState(executor);
+      if (!state) {
+        throw new Error("No setup state on this server");
+      }
+      await writeState(executor, { ...state, ptrAcknowledged: true });
+    });
+  } catch (err) {
+    return c.json(
+      { error: err instanceof Error ? err.message : "PTR acknowledge failed" },
+      400,
+    );
+  }
+  return c.json({ ok: true });
+}
+
+/**
+ * POST /mail/setup/reset — wipe the state file on the target server.
+ *
+ * Body: { serverId: string }
+ *
+ * Useful after the operator has purged or reimaged the VPS — clears any
+ * stale state without manually SSHing to delete the JSON. Does NOT touch
+ * iRedMail or any installed daemons; just removes openship's record.
+ */
+export async function resetSetup(c: Context) {
+  if (env.CLOUD_MODE) return c.json({ error: "Not available" }, 404);
+
+  const body = await c.req.json().catch(() => ({}));
+  const serverId = body.serverId as string | undefined;
+  if (!serverId) return c.json({ error: "serverId is required" }, 400);
+
+  if (active?.serverId === serverId) {
+    return c.json({ error: "Cancel the running setup first" }, 409);
   }
 
   try {
-    const result = await sshManager.withExecutor(serverId, (executor) =>
-      resolveConflict(executor, conflict, resolutionId),
-    );
-    return c.json(result);
+    await sshManager.withExecutor(serverId, (executor) => clearState(executor));
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Resolution failed";
-    return c.json({ error: message, success: false }, 500);
+    return c.json(
+      { error: err instanceof Error ? err.message : "Reset failed" },
+      500,
+    );
+  }
+  return c.json({ ok: true });
+}
+
+/**
+ * POST /mail/credentials/postmaster — rotate the postmaster password.
+ *
+ * Body: { serverId: string, password: string }
+ *
+ * Hashes via doveadm, UPDATEs `vmail.mailbox`, mirrors the cleartext into
+ * the on-server state file so the dashboard's Credentials card refreshes
+ * cleanly. Refuses if a setup is currently running against the same server
+ * (would race with the installer's own writes to that row).
+ */
+export async function setPostmasterPassword(c: Context) {
+  if (env.CLOUD_MODE) return c.json({ error: "Not available" }, 404);
+
+  const body = await c.req.json().catch(() => ({}));
+  const serverId = body.serverId as string | undefined;
+  const password = body.password as string | undefined;
+
+  if (!serverId) return c.json({ error: "serverId is required" }, 400);
+  if (typeof password !== "string" || password.length < 12) {
+    return c.json(
+      { error: "Password must be at least 12 characters" },
+      400,
+    );
+  }
+  if (active?.serverId === serverId) {
+    return c.json(
+      { error: "Setup is currently running — wait for it to finish" },
+      409,
+    );
+  }
+
+  try {
+    await sshManager.withExecutor(serverId, async (executor) => {
+      const state = await readState(executor);
+      if (!state) throw new Error("No setup state on this server");
+      await updatePostmasterPassword(executor, state.domain, password);
+    });
+  } catch (err) {
+    return c.json(
+      { error: err instanceof Error ? err.message : "Password change failed" },
+      500,
+    );
+  }
+  return c.json({ ok: true });
+}
+
+/**
+ * GET /mail/health/:serverId — live status of every mail-core daemon.
+ *
+ * Used by the dashboard's Mail tab to show running/stopped pills next to
+ * each component. Cheap: one short SSH per unit, all parallel.
+ */
+export async function getHealth(c: Context) {
+  if (env.CLOUD_MODE) return c.json({ error: "Not available" }, 404);
+
+  const serverId = c.req.param("serverId");
+  if (!serverId) return c.json({ error: "serverId is required" }, 400);
+
+  try {
+    const components = await sshManager.withExecutor(serverId, (executor) =>
+      checkMailHealth(executor),
+    );
+    return c.json({ serverId, components, definitions: MAIL_COMPONENTS });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Health check failed";
+    return c.json({ error: message }, 500);
   }
 }

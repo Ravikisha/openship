@@ -19,9 +19,12 @@ export { deployComposeServices, type ComposeDeployResult } from "./deploy.servic
 export {
   isLegacyComposeProject,
   listProjectServices,
+  listProjectComposeServices,
+  listProjectMonorepoApps,
   projectServicesToComposeServices,
   resolveProjectServicePreflightServices,
   shouldUseProjectServicePipeline,
+  shouldUseProjectMonorepoPipeline,
 } from "./project-services";
 
 // Shared helpers

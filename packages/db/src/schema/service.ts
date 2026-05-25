@@ -12,15 +12,31 @@ import { deployment } from "./deployment";
 // ─── Services ────────────────────────────────────────────────────────────────
 
 /**
- * Compose services within a project.
- * Each service represents a single container in a multi-service (docker-compose) project.
- * Services share a Docker network and can reach each other by name as hostname.
+ * Deployable units within a project.
+ *
+ * Two flavors share this table, discriminated by the `kind` column:
+ *
+ *   - `kind = "compose"` — a docker-compose service (image / Dockerfile + ports).
+ *     The original use case. Build/start commands come from the Dockerfile or
+ *     image, so the build/install/start columns below stay null.
+ *
+ *   - `kind = "monorepo"` — a sub-app inside a monorepo. Each row carries the
+ *     full single-app build config (rootDirectory, install/build/start
+ *     commands, port, framework). N rows live under one project that shares
+ *     one workspace install at the repo root.
+ *
+ * Routing / env scoping / multi-service deploy fan-out is identical for both
+ * kinds, so the existing infrastructure (buildServiceRouteDomain, envVar.serviceId,
+ * MultiServiceRuntimeAdapter) works for monorepo apps without forking.
  */
 export const service = pgTable("service", {
   id: text("id").primaryKey(), // "svc_..."
   projectId: text("project_id")
     .notNull()
     .references(() => project.id, { onDelete: "cascade" }),
+
+  /** Discriminator: "compose" (docker-compose service) | "monorepo" (sub-app in a workspace) */
+  kind: text("kind").notNull().default("compose"),
 
   /** Service name (from compose, e.g. "web", "db", "redis") — also used as hostname on the network */
   name: text("name").notNull(),
@@ -58,6 +74,24 @@ export const service = pgTable("service", {
   customDomain: text("custom_domain"),
   /** Whether the service uses a free or custom domain */
   domainType: text("domain_type").default("free"),
+
+  /* ── Monorepo sub-app config (kind === "monorepo" only) ────────────── */
+  /** Sub-app root directory inside the repo (e.g. "apps/web"). Null for compose. */
+  rootDirectory: text("root_directory"),
+  /** Per-app install command (run after the shared workspace install). Null for compose. */
+  installCommand: text("install_command"),
+  /** Per-app build command. Null for compose. */
+  buildCommand: text("build_command"),
+  /** Per-app start command — what the long-running workload runs. Null for compose. */
+  startCommand: text("start_command"),
+  /** Build output directory relative to the sub-app's root. Null for compose. */
+  outputDirectory: text("output_directory"),
+  /** Detected framework (e.g. "nextjs", "vite"). Null for compose. */
+  framework: text("framework"),
+  /** Package manager (npm/pnpm/yarn/bun). Null for compose. */
+  packageManager: text("package_manager"),
+  /** Build image / runtime base (e.g. "node:22"). Null for compose. */
+  buildImage: text("build_image"),
 
   /* ── State ──────────────────────────────────────────────────────────── */
   /** Whether this service should be deployed (allows disabling individual services) */

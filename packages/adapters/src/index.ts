@@ -137,6 +137,7 @@ export {
   installDocker,
   installGit,
   installOpenResty,
+  installRsync,
   uninstallCertbot,
   uninstallOpenResty,
   uninstallRsync,

@@ -22,6 +22,18 @@ export interface InstanceSettings {
 export interface ServerInfo {
   id: string;
   name: string | null;
+  /**
+   * Server capabilities — two orthogonal booleans. Composes for any
+   * combination (apps-only, mail-only, or both on the same host).
+   *
+   *   runsApps = true  → openship deploys apps here (Docker / bare runtime).
+   *                      Component installer (Docker/certbot/rsync) allowed.
+   *   runsMail = true  → mail-server provisioning pipeline can target it.
+   *
+   * At least one is always true.
+   */
+  runsApps: boolean;
+  runsMail: boolean;
   sshHost: string;
   sshPort: number;
   sshUser: string;

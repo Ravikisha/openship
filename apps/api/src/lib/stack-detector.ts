@@ -19,7 +19,19 @@
  *   Generic: Node.js, static, Docker
  */
 
-import { STACKS, OUTPUT_DIRECTORIES, getProjectType, getBuildImage, type StackId, type ProjectType, type StackDefinition, type StackDetection } from "@repo/core";
+import {
+  STACKS,
+  OUTPUT_DIRECTORIES,
+  getProjectType,
+  getBuildImage,
+  LANGUAGE_MANIFEST_FILES,
+  collectDependencies,
+  detectPort as detectPortFromLanguages,
+  type StackId,
+  type ProjectType,
+  type StackDefinition,
+  type StackDetection,
+} from "@repo/core";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -45,21 +57,15 @@ export interface StackResult {
 
 // ─── Manifest files to read for deep detection ───────────────────────────────
 
-/** Manifest filenames callers should try to read and pass to detectStack */
-export const MANIFEST_FILES = [
-  "requirements.txt",
-  "pyproject.toml",
-  "Pipfile",
-  "go.mod",
-  "Cargo.toml",
-  "Gemfile",
-  "composer.json",
-  "pom.xml",
-  "build.gradle",
-  "build.gradle.kts",
-  "mix.exs",
-  "Dockerfile",
-] as const;
+/**
+ * Manifest filenames callers should fetch and pass to `detectStack`.
+ *
+ * Derived from `LANGUAGE_DETECTORS` — adding a language family in
+ * `@repo/core/languages/` automatically adds its manifests here. The exported
+ * shape is a tuple of lowercase basenames; preserve order from the registry
+ * so callers can iterate deterministically.
+ */
+export const MANIFEST_FILES: readonly string[] = LANGUAGE_MANIFEST_FILES;
 
 // ─── Package manager detection ───────────────────────────────────────────────
 
@@ -318,187 +324,12 @@ const FRAMEWORK_RULES: FrameworkRule[] = [
   },
 ];
 
-// ─── Port detection from package.json scripts ────────────────────────────────
-
-/**
- * Scan package.json scripts for explicit --port / -p flags.
- * Returns the port number if found, or null to fall back to framework default.
- */
-function detectPortFromScripts(packageJson?: Record<string, unknown>): number | null {
-  const scripts = (packageJson?.scripts ?? {}) as Record<string, string>;
-
-  // Check start, dev, serve, preview — in priority order
-  for (const key of ["start", "dev", "serve", "preview"]) {
-    const script = scripts[key];
-    if (!script) continue;
-
-    // Match --port 8080, --port=8080, -p 8080, -p=8080
-    const match = script.match(/(?:--port|--PORT|-p)[\s=](\d{2,5})\b/);
-    if (match) {
-      const port = parseInt(match[1], 10);
-      if (port > 0 && port <= 65535) return port;
-    }
-  }
-
-  return null;
-}
-
-// ─── Manifest parsers ────────────────────────────────────────────────────────
-
-/** Parse Python requirements.txt into a deps map (lowercase keys) */
-function parseRequirementsTxt(content: string): Record<string, string> {
-  const deps: Record<string, string> = {};
-  for (const raw of content.split("\n")) {
-    const line = raw.trim();
-    if (!line || line.startsWith("#") || line.startsWith("-")) continue;
-    const m = line.match(/^([A-Za-z0-9][A-Za-z0-9._-]*)/);
-    if (m) deps[m[1].toLowerCase().replace(/-/g, "_")] = line.slice(m[1].length) || "*";
-  }
-  return deps;
-}
-
-/** Parse pyproject.toml — PEP 621 [project].dependencies + Poetry [tool.poetry.dependencies] */
-function parsePyprojectToml(content: string): Record<string, string> {
-  const deps: Record<string, string> = {};
-
-  // PEP 621: dependencies = ["flask>=2.0", "sqlalchemy"]
-  const pep621 = content.match(/\[project\][^[]*?dependencies\s*=\s*\[([\s\S]*?)\]/);
-  if (pep621) {
-    const items = pep621[1].matchAll(/["']([^"']+)["']/g);
-    for (const item of items) {
-      const m = item[1].match(/^([A-Za-z0-9][A-Za-z0-9._-]*)/);
-      if (m) deps[m[1].toLowerCase().replace(/-/g, "_")] = "*";
-    }
-  }
-
-  // Poetry: [tool.poetry.dependencies]
-  // Terminate body at `\n[` (next section header). Using bare `\[` would mis-stop
-  // on `[` inside string values like `flask = {extras = ["redis"]}`.
-  const poetry = content.match(/\[tool\.poetry\.dependencies\]([\s\S]*?)(?=\n\[|$)/);
-  if (poetry) {
-    for (const line of poetry[1].split("\n")) {
-      const m = line.match(/^([A-Za-z0-9][A-Za-z0-9_-]*)\s*=/);
-      if (m && m[1] !== "python") deps[m[1].toLowerCase().replace(/-/g, "_")] = "*";
-    }
-  }
-
-  // Optional dependencies — matches both PEP 621 standard form
-  //   [project.optional-dependencies]
-  //     api = ["fastapi", "uvicorn[standard]"]
-  // and the per-group sub-table form
-  //   [project.optional-dependencies.api]
-  // The body is scanned for any quoted string that starts with a package name.
-  const optGroups = content.matchAll(/\[project\.optional-dependencies(?:\.[^\]]+)?\]([\s\S]*?)(?=\n\[|$)/g);
-  for (const group of optGroups) {
-    const items = group[1].matchAll(/["']([^"']+)["']/g);
-    for (const item of items) {
-      const m = item[1].match(/^([A-Za-z0-9][A-Za-z0-9._-]*)/);
-      if (m) deps[m[1].toLowerCase().replace(/-/g, "_")] = "*";
-    }
-  }
-
-  return deps;
-}
-
-/** Parse Pipfile [packages] + [dev-packages] sections */
-function parsePipfile(content: string): Record<string, string> {
-  const deps: Record<string, string> = {};
-  // Terminate body at next section header (`\n[`) — guards against `[` inside
-  // inline-table values like `flask = {extras = ["redis"]}`.
-  const sections = content.matchAll(/\[(packages|dev-packages)\]([\s\S]*?)(?=\n\[|$)/g);
-  for (const section of sections) {
-    for (const line of section[2].split("\n")) {
-      const m = line.match(/^([A-Za-z0-9][A-Za-z0-9_-]*)\s*=/);
-      if (m) deps[m[1].toLowerCase().replace(/-/g, "_")] = "*";
-    }
-  }
-  return deps;
-}
-
-/** Parse go.mod require blocks into deps map */
-function parseGoMod(content: string): Record<string, string> {
-  const deps: Record<string, string> = {};
-  // Multi-line require blocks
-  const blocks = content.matchAll(/require\s*\(([\s\S]*?)\)/g);
-  for (const block of blocks) {
-    for (const line of block[1].split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("//")) continue;
-      const parts = trimmed.split(/\s+/);
-      if (parts.length >= 2) {
-        deps[parts[0]] = parts[1];
-        // Strip major version suffix: github.com/foo/bar/v2 → github.com/foo/bar
-        const base = parts[0].replace(/\/v\d+$/, "");
-        if (base !== parts[0]) deps[base] = parts[1];
-      }
-    }
-  }
-  // Single-line requires
-  for (const m of content.matchAll(/^require\s+([\S]+)\s+([\S]+)/gm)) {
-    deps[m[1]] = m[2];
-    const base = m[1].replace(/\/v\d+$/, "");
-    if (base !== m[1]) deps[base] = m[2];
-  }
-  return deps;
-}
-
-/** Parse Cargo.toml [dependencies] / [dev-dependencies] / [build-dependencies] */
-function parseCargoToml(content: string): Record<string, string> {
-  const deps: Record<string, string> = {};
-  // Terminate body at next section header (`\n[`) — guards against `[` inside
-  // inline-table values like `tokio = { features = ["full"] }`.
-  const sections = content.matchAll(/\[(?:workspace\.)?(?:dev-|build-)?dependencies\]([\s\S]*?)(?=\n\[|$)/g);
-  for (const section of sections) {
-    for (const line of section[1].split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("#")) continue;
-      const m = trimmed.match(/^([A-Za-z0-9_-]+)\s*=/);
-      if (m) deps[m[1]] = "*";
-    }
-  }
-  return deps;
-}
-
-/** Parse Gemfile gem declarations */
-function parseGemfile(content: string): Record<string, string> {
-  const deps: Record<string, string> = {};
-  for (const m of content.matchAll(/gem\s+['"]([^'"]+)['"]/g)) {
-    deps[m[1].toLowerCase()] = "*";
-  }
-  return deps;
-}
-
-/** Parse composer.json require + require-dev */
-function parseComposerJson(content: string): Record<string, string> {
-  try {
-    const parsed = JSON.parse(content);
-    return { ...(parsed.require ?? {}), ...(parsed["require-dev"] ?? {}) };
-  } catch {
-    return {};
-  }
-}
-
-/** Parse Elixir mix.exs deps ({:phoenix, "~> 1.7"}) */
-function parseMixExs(content: string): Record<string, string> {
-  const deps: Record<string, string> = {};
-  for (const m of content.matchAll(/\{:([\w]+),/g)) {
-    deps[m[1]] = "*";
-  }
-  return deps;
-}
-
-/** Extract EXPOSE port from Dockerfile */
-function parseDockerfilePort(content?: string): number | null {
-  if (!content) return null;
-  const m = content.match(/^EXPOSE\s+(\d{2,5})/m);
-  if (m) {
-    const port = parseInt(m[1], 10);
-    if (port > 0 && port <= 65535) return port;
-  }
-  return null;
-}
-
 // ─── Main detection ──────────────────────────────────────────────────────────
+//
+// Manifest parsing and port detection live in `@repo/core/languages/` — one
+// file per language family. The detector iterates that registry to merge deps
+// from every present manifest and resolve a default port. Adding a language is
+// one new file under packages/core/src/languages/ + a registry entry there.
 
 export function detectStack(
   files: RepoFile[],
@@ -506,26 +337,22 @@ export function detectStack(
   fileContents?: Record<string, string>,
 ): StackResult {
   const fileSet = new Set(files.map((f) => f.name.toLowerCase()));
-  const deps: Record<string, string> = {
-    ...((packageJson?.dependencies as Record<string, string>) ?? {}),
-    ...((packageJson?.devDependencies as Record<string, string>) ?? {}),
-  };
 
-  // Normalize file content keys to lowercase for consistent lookups
+  // Normalize file content keys to lowercase for consistent lookups.
   const fc: Record<string, string> = {};
   if (fileContents) {
     for (const [k, v] of Object.entries(fileContents)) fc[k.toLowerCase()] = v;
   }
 
-  // Merge deps from language-specific manifests
-  if (fc["requirements.txt"]) Object.assign(deps, parseRequirementsTxt(fc["requirements.txt"]));
-  if (fc["pyproject.toml"]) Object.assign(deps, parsePyprojectToml(fc["pyproject.toml"]));
-  if (fc["pipfile"]) Object.assign(deps, parsePipfile(fc["pipfile"]));
-  if (fc["go.mod"]) Object.assign(deps, parseGoMod(fc["go.mod"]));
-  if (fc["cargo.toml"]) Object.assign(deps, parseCargoToml(fc["cargo.toml"]));
-  if (fc["gemfile"]) Object.assign(deps, parseGemfile(fc["gemfile"]));
-  if (fc["composer.json"]) Object.assign(deps, parseComposerJson(fc["composer.json"]));
-  if (fc["mix.exs"]) Object.assign(deps, parseMixExs(fc["mix.exs"]));
+  // Merge deps: JS deps come from the parsed package.json, the rest come from
+  // language-specific manifest parsers via the registry. The JS detector's
+  // `parseManifest` would also work here, but we already have the parsed object
+  // on hand so we skip the re-parse and feed the deps in directly.
+  const deps: Record<string, string> = {
+    ...((packageJson?.dependencies as Record<string, string>) ?? {}),
+    ...((packageJson?.devDependencies as Record<string, string>) ?? {}),
+    ...collectDependencies(fc),
+  };
 
   let matched: StackId = "unknown";
 
@@ -580,7 +407,7 @@ export function detectStack(
     buildImage: getBuildImage(matched, pm),
     outputDirectory: OUTPUT_DIRECTORIES[matched] ?? "dist",
     productionPaths: (stackDef as StackDefinition).productionPaths ? [...(stackDef as StackDefinition).productionPaths!] : [],
-    port: detectPortFromScripts(packageJson) ?? parseDockerfilePort(fc["dockerfile"]) ?? stackDef.defaultPort,
+    port: detectPortFromLanguages({ packageJson, fileContents: fc }) ?? stackDef.defaultPort,
   };
 }
 
@@ -608,10 +435,21 @@ export function getInstallCommand(pm: string): string {
   }
 }
 
+/**
+ * Resolve the npm-script runner verb for a package manager.
+ * `bun build` / `bun start` are NOT the bundler / npm-script — they're separate Bun
+ * subcommands. yarn and pnpm fall back to running scripts when given a bare name,
+ * but bun and npm don't, so both need the explicit `run`.
+ */
+function scriptRunner(pm: string): string {
+  if (pm === "npm" || pm === "bun") return `${pm} run`;
+  return pm;
+}
+
 /** Build command — prefers project scripts, then falls back to registry defaults */
 export function getBuildCommand(pm: string, stack: StackId, packageJson?: Record<string, unknown>): string {
   const scripts = (packageJson?.scripts ?? {}) as Record<string, string>;
-  const runner = pm === "npm" ? "npm run" : pm;
+  const runner = scriptRunner(pm);
 
   // JS/TS: if the project has a build script, always prefer it
   if (scripts.build && ["npm", "yarn", "pnpm", "bun"].includes(pm)) {
@@ -625,7 +463,7 @@ export function getBuildCommand(pm: string, stack: StackId, packageJson?: Record
 /** Start command — prefers project scripts, then falls back to registry defaults */
 export function getStartCommand(pm: string, stack: StackId, packageJson?: Record<string, unknown>): string {
   const scripts = (packageJson?.scripts ?? {}) as Record<string, string>;
-  const runner = pm === "npm" ? "npm run" : pm;
+  const runner = scriptRunner(pm);
 
   // JS/TS: prefer explicit start script
   if (scripts.start && ["npm", "yarn", "pnpm", "bun"].includes(pm)) {

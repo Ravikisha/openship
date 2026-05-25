@@ -5,7 +5,7 @@ import type { DeploymentContextType } from "./deployment/types";
 import { useDeploymentConfig } from "./deployment/useDeploymentConfig";
 import { useDeploymentBuild } from "./deployment/useDeploymentBuild";
 
-const DeploymentContext = createContext<DeploymentContextType | undefined>(undefined);
+export const DeploymentContext = createContext<DeploymentContextType | undefined>(undefined);
 
 export const useDeployment = () => {
   const context = useContext(DeploymentContext);

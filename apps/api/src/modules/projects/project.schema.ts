@@ -38,6 +38,33 @@ const PublicEndpointSchema = Type.Object({
   domainType: Type.Optional(Type.Union([Type.Literal("free"), Type.Literal("custom")])),
 });
 
+/** One sub-app inside a monorepo project. */
+const MonorepoAppSchema = Type.Object({
+  name: Type.String({ minLength: 1, maxLength: 100 }),
+  rootDirectory: Type.String({ minLength: 1, maxLength: 200 }),
+  framework: Type.Optional(FrameworkEnum),
+  packageManager: Type.Optional(PackageManagerEnum),
+  buildImage: Type.Optional(Type.String({ maxLength: 200 })),
+  installCommand: Type.Optional(Type.String({ maxLength: 500 })),
+  buildCommand: Type.Optional(Type.String({ maxLength: 500 })),
+  startCommand: Type.Optional(Type.String({ maxLength: 500 })),
+  outputDirectory: Type.Optional(Type.String({ maxLength: 200 })),
+  port: Type.Optional(Type.Number({ minimum: 1, maximum: 65535 })),
+  enabled: Type.Optional(Type.Boolean({ default: true })),
+  exposed: Type.Optional(Type.Boolean({ default: true })),
+  domain: Type.Optional(
+    Type.String({ minLength: 1, maxLength: 63, pattern: "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$" }),
+  ),
+  customDomain: Type.Optional(Type.String({ minLength: 1, maxLength: 255 })),
+  domainType: Type.Optional(Type.Union([Type.Literal("free"), Type.Literal("custom")])),
+  environment: Type.Optional(Type.Record(Type.String(), Type.String())),
+});
+
+const MonorepoWorkspaceSchema = Type.Object({
+  packageManager: Type.String({ minLength: 1, maxLength: 32 }),
+  installCommand: Type.Optional(Type.String({ maxLength: 500 })),
+});
+
 // ─── Route params ────────────────────────────────────────────────────────────
 
 export const ProjectIdParam = Type.Object({
@@ -85,6 +112,20 @@ export const CreateProjectBody = Type.Object({
   hasServer: Type.Optional(Type.Boolean({ default: true })),
   hasBuild: Type.Optional(Type.Boolean({ default: true })),
   rollbackWindow: Type.Optional(Type.Number({ minimum: 0, maximum: 20 })),
+
+  /** Project flavor — "monorepo" wires the request through the multi-app path below. */
+  projectType: Type.Optional(
+    Type.Union([
+      Type.Literal("app"),
+      Type.Literal("docker"),
+      Type.Literal("services"),
+      Type.Literal("monorepo"),
+    ]),
+  ),
+  /** Sub-apps discovered inside a monorepo. Only used when projectType === "monorepo". */
+  monorepoApps: Type.Optional(Type.Array(MonorepoAppSchema, { minItems: 1, maxItems: 50 })),
+  /** Shared workspace install (run once at repo root). Only used when projectType === "monorepo". */
+  monorepoWorkspace: Type.Optional(MonorepoWorkspaceSchema),
 });
 
 export const UpdateProjectBody = Type.Partial(CreateProjectBody);

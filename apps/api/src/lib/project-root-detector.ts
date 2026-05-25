@@ -1,4 +1,11 @@
-import { STACK_ROOT_MARKERS, getBuildImage } from "@repo/core";
+import {
+  STACK_ROOT_MARKERS,
+  WORKSPACE_DETECTORS,
+  WORKSPACE_MANIFEST_FILES,
+  findMatchingDetectors,
+  getBuildImage,
+  type WorkspaceDetector,
+} from "@repo/core";
 import {
   detectPackageManager,
   detectStack,
@@ -9,6 +16,9 @@ import {
   type StackResult,
 } from "./stack-detector";
 import { posix as pathPosix } from "node:path";
+
+/** JS package managers that benefit from the `cd ../.. && <pm> install` rewrite. */
+const JS_PACKAGE_MANAGERS = new Set(["npm", "pnpm", "yarn", "bun"]);
 
 export interface RepoTreeEntry {
   path: string;
@@ -176,72 +186,6 @@ function sourcePriority(source: ProjectRootHint["source"]): number {
   }
 }
 
-function hasPackageJsonWorkspaces(packageJson?: Record<string, unknown>): boolean {
-  const workspaces = packageJson?.workspaces;
-  if (Array.isArray(workspaces)) {
-    return workspaces.some((value) => typeof value === "string" && value.trim().length > 0);
-  }
-
-  if (!workspaces || typeof workspaces !== "object") {
-    return false;
-  }
-
-  const packages = (workspaces as { packages?: unknown }).packages;
-  return Array.isArray(packages)
-    ? packages.some((value) => typeof value === "string" && value.trim().length > 0)
-    : false;
-}
-
-function getPackageJsonWorkspacePatterns(packageJson?: Record<string, unknown>): string[] {
-  const workspaces = packageJson?.workspaces;
-  if (Array.isArray(workspaces)) {
-    return workspaces.filter((value): value is string => typeof value === "string" && value.trim().length > 0);
-  }
-
-  if (!workspaces || typeof workspaces !== "object") {
-    return [];
-  }
-
-  const packages = (workspaces as { packages?: unknown }).packages;
-  return Array.isArray(packages)
-    ? packages.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-    : [];
-}
-
-function getPnpmWorkspacePatterns(pnpmWorkspaceContent?: string): string[] {
-  if (!pnpmWorkspaceContent) {
-    return [];
-  }
-
-  const patterns: string[] = [];
-  let inPackagesBlock = false;
-
-  for (const rawLine of pnpmWorkspaceContent.split("\n")) {
-    const line = rawLine.replace(/#.*$/, "").trimEnd();
-    if (!line) {
-      continue;
-    }
-
-    if (!inPackagesBlock) {
-      if (/^packages\s*:\s*$/.test(line.trim())) {
-        inPackagesBlock = true;
-      }
-      continue;
-    }
-
-    if (/^[A-Za-z0-9_-]+\s*:/.test(line.trim())) {
-      break;
-    }
-
-    const match = line.match(/^\s*-\s*['"]?([^'"]+)['"]?\s*$/);
-    if (match) {
-      patterns.push(match[1]);
-    }
-  }
-
-  return patterns;
-}
-
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -266,39 +210,113 @@ function matchesWorkspacePattern(rootDirectory: string, pattern: string): boolea
 }
 
 /**
- * Rush monorepo: rush.json declares each project explicitly under projects[].projectFolder.
+ * Walk every registered workspace detector and ask, "do you see your manifest
+ * at this root, and if so, what sub-project paths does it declare?"
+ *
+ * Returns the flat list of detector matches (one detector can produce N patterns).
+ * Multiple detectors can match the same repo (a polyglot monorepo with both
+ * pnpm workspaces and a Cargo workspace); we return every match so the caller
+ * can union the patterns and identify all workspace-sourced sub-projects.
+ *
+ * `package.json` is special-cased: we feed the already-parsed `rootPackageJson`
+ * straight to its detector rather than the raw text, since the rest of the
+ * pipeline has already parsed it.
  */
-function parseRushWorkspacePatterns(rushJsonContent?: string): string[] {
-  if (!rushJsonContent) {
-    return [];
+function detectWorkspaces(
+  rootFileContents: Record<string, string> | undefined,
+  rootPackageJson: Record<string, unknown> | undefined,
+  rootFiles: ReadonlyArray<{ name: string }> = [],
+): { detector: WorkspaceDetector; patterns: string[] }[] {
+  const normalized = normalizeFileContents(rootFileContents);
+  const matches: { detector: WorkspaceDetector; patterns: string[] }[] = [];
+  const ranDetectors = new Set<string>();
+
+  const recordMatch = (detector: WorkspaceDetector, patterns: string[]) => {
+    if (ranDetectors.has(detector.id)) return;
+    ranDetectors.add(detector.id);
+    if (patterns.length > 0) matches.push({ detector, patterns });
+  };
+
+  // npm-workspaces gets a fast path: the caller has typically already parsed
+  // package.json, so we feed it the object directly instead of re-parsing.
+  if (rootPackageJson) {
+    for (const detector of WORKSPACE_DETECTORS) {
+      if (detector.id !== "npm-workspaces") continue;
+      recordMatch(detector, extractPackageJsonWorkspacePatterns(rootPackageJson));
+    }
   }
 
-  try {
-    const parsed = JSON.parse(rushJsonContent) as { projects?: unknown };
-    const projects = Array.isArray(parsed.projects) ? parsed.projects : [];
-
-    return projects
-      .map((entry) => {
-        if (!entry || typeof entry !== "object") return "";
-        const folder = (entry as { projectFolder?: unknown }).projectFolder;
-        return typeof folder === "string" ? folder : "";
-      })
-      .filter((folder) => folder.trim().length > 0);
-  } catch {
-    return [];
+  // Static manifests with content (pnpm-workspace.yaml, Cargo.toml, go.work, pom.xml, …).
+  for (const [filename, content] of Object.entries(normalized)) {
+    if (!WORKSPACE_MANIFEST_FILES.has(filename)) continue;
+    for (const detector of findMatchingDetectors(filename)) {
+      recordMatch(detector, detector.parseSubProjects(content));
+    }
   }
+
+  // Regex-based manifests (e.g. *.sln). We scan the root file listing for the
+  // filename pattern, then fall back to fileContents for the actual text.
+  for (const file of rootFiles) {
+    const filename = file.name;
+    if (WORKSPACE_MANIFEST_FILES.has(filename.toLowerCase())) continue;
+    const regexDetectors = WORKSPACE_DETECTORS.filter((detector) =>
+      detector.manifestFiles.some((m) => m instanceof RegExp && m.test(filename)),
+    );
+    for (const detector of regexDetectors) {
+      const content = normalized[filename.toLowerCase()];
+      if (!content) continue;
+      recordMatch(detector, detector.parseSubProjects(content));
+    }
+  }
+
+  return matches;
+}
+
+/**
+ * package.json workspaces extraction — the npm detector parses raw JSON, but
+ * the rest of the project-root-detector already has the parsed object on hand.
+ * Short-circuit straight to the value here to avoid a re-parse.
+ */
+function extractPackageJsonWorkspacePatterns(packageJson: Record<string, unknown>): string[] {
+  const workspaces = packageJson.workspaces;
+  if (Array.isArray(workspaces)) {
+    return workspaces.filter(
+      (value): value is string => typeof value === "string" && value.trim().length > 0,
+    );
+  }
+  if (workspaces && typeof workspaces === "object") {
+    const packages = (workspaces as { packages?: unknown }).packages;
+    if (Array.isArray(packages)) {
+      return packages.filter(
+        (value): value is string => typeof value === "string" && value.trim().length > 0,
+      );
+    }
+  }
+  return [];
 }
 
 function getWorkspacePatterns(
   rootPackageJson?: Record<string, unknown>,
   rootFileContents?: Record<string, string>,
+  rootFiles: ReadonlyArray<{ name: string }> = [],
 ): string[] {
-  const normalizedFileContents = normalizeFileContents(rootFileContents);
-  return [
-    ...getPackageJsonWorkspacePatterns(rootPackageJson),
-    ...getPnpmWorkspacePatterns(normalizedFileContents["pnpm-workspace.yaml"]),
-    ...parseRushWorkspacePatterns(normalizedFileContents["rush.json"]),
-  ].map((pattern) => normalizeProjectRootDirectory(pattern)).filter(Boolean);
+  return detectWorkspaces(rootFileContents, rootPackageJson, rootFiles)
+    .flatMap((match) => match.patterns)
+    .map((pattern) => normalizeProjectRootDirectory(pattern))
+    .filter(Boolean);
+}
+
+/** First detector whose package manager applies to JS workspace-context rewriting (if any). */
+function detectJsWorkspaceManager(
+  rootFileContents: Record<string, string> | undefined,
+  rootPackageJson: Record<string, unknown> | undefined,
+  rootFiles: ReadonlyArray<{ name: string }> = [],
+): string | null {
+  for (const match of detectWorkspaces(rootFileContents, rootPackageJson, rootFiles)) {
+    const pm = match.detector.packageManager;
+    if (pm && JS_PACKAGE_MANAGERS.has(pm)) return pm;
+  }
+  return null;
 }
 
 function preScoreHint(rootDirectory: string, source: ProjectRootHint["source"]): number {
@@ -484,15 +502,25 @@ function isNestedSingleAppCandidate(candidate: ProjectRootSnapshot): boolean {
   );
 }
 
-function hasRootWorkspaceContext(root: ProjectRootSnapshotInput): boolean {
-  const rootPackageJson = root.packageJson;
-  const normalizedFileContents = normalizeFileContents(root.fileContents);
-  const rootFileSet = new Set(root.files.map((file) => file.name.toLowerCase()));
-
+/**
+ * True when the repo root declares a JS workspace (pnpm/npm/yarn/Rush) — the
+ * subset of workspace families where install commands need rewriting to the
+ * repo root via `cd ../.. && pnpm install`. Cargo / Go / .NET workspaces don't
+ * qualify because their build tools resolve workspace context implicitly.
+ */
+function hasJsWorkspaceContext(root: ProjectRootSnapshotInput): boolean {
   return (
-    hasPackageJsonWorkspaces(rootPackageJson) ||
-    rootFileSet.has("pnpm-workspace.yaml") ||
-    Boolean(normalizedFileContents["pnpm-workspace.yaml"])
+    detectJsWorkspaceManager(root.fileContents, root.packageJson, root.files) !== null
+  );
+}
+
+/**
+ * True when the repo root has ANY recognized workspace manifest (JS or otherwise) —
+ * used by monorepo discovery to decide whether a multi-sub-app flow applies.
+ */
+function hasAnyWorkspaceContext(root: ProjectRootSnapshotInput): boolean {
+  return (
+    detectWorkspaces(root.fileContents, root.packageJson, root.files).length > 0
   );
 }
 
@@ -515,7 +543,7 @@ export function applyWorkspaceContext(
   rootInput: ProjectRootSnapshotInput,
   selectedProject: ProjectRootSnapshot,
 ): ProjectRootSnapshot {
-  if (!selectedProject.rootDirectory || !hasRootWorkspaceContext(rootInput)) {
+  if (!selectedProject.rootDirectory || !hasJsWorkspaceContext(rootInput)) {
     return selectedProject;
   }
 
@@ -633,4 +661,110 @@ export function selectPreferredSingleAppRoot(
     isEligible: isNestedSingleAppCandidate,
     fallback: () => null,
   });
+}
+
+// ─── Monorepo detection ──────────────────────────────────────────────────────
+
+export interface MonorepoWorkspace {
+  /** Package manager declared at the repo root (npm/pnpm/yarn/bun). */
+  packageManager: string;
+  /** Workspace-aware install command, e.g. "pnpm install" or "npm install". */
+  installCommand: string;
+}
+
+export interface MonorepoApp {
+  /** Stable identifier for this sub-app (e.g. "apps/web"). */
+  id: string;
+  /** Display name (last segment of rootDirectory, or package.json name). */
+  name: string;
+  rootDirectory: string;
+  stack: StackResult["stack"];
+  category: string;
+  packageManager: string;
+  buildCommand: string;
+  installCommand: string;
+  startCommand: string;
+  buildImage: string;
+  outputDirectory: string;
+  productionPaths: string[];
+  port: number;
+}
+
+/**
+ * A repo is treated as a monorepo when its root declares a workspace manifest
+ * AND we discover two or more deployable sub-app candidates.
+ *
+ * Returns null when the repo doesn't qualify (single-app, services, plain backend, etc.).
+ */
+export function discoverMonorepoApps(
+  rootInput: ProjectRootSnapshotInput,
+  candidateInputs: ProjectRootSnapshotInput[],
+): { apps: MonorepoApp[]; workspace: MonorepoWorkspace } | null {
+  if (!hasAnyWorkspaceContext(rootInput)) return null;
+
+  const candidates = candidateInputs
+    .map(buildSnapshot)
+    .filter(isMonorepoAppCandidate);
+
+  if (candidates.length < 2) return null;
+
+  const workspacePackageManager = detectPackageManager(
+    rootInput.files,
+    rootInput.packageJson as Record<string, unknown> & {
+      packageManager?: string;
+      scripts?: Record<string, string>;
+      engines?: Record<string, string>;
+    },
+  );
+  const resolvedPackageManager = workspacePackageManager === "unknown" ? "npm" : workspacePackageManager;
+  const installCommand = getInstallCommand(resolvedPackageManager) || "";
+
+  const apps = candidates.map((candidate): MonorepoApp => {
+    const segments = candidate.rootDirectory.split("/");
+    const name =
+      (candidate.packageJson?.name as string | undefined)?.trim() ||
+      segments.at(-1) ||
+      candidate.rootDirectory;
+
+    return {
+      id: candidate.rootDirectory,
+      name,
+      rootDirectory: candidate.rootDirectory,
+      stack: candidate.stack.stack,
+      category: candidate.stack.category,
+      packageManager: candidate.stack.packageManager,
+      buildCommand: candidate.stack.buildCommand,
+      installCommand: candidate.stack.installCommand,
+      startCommand: candidate.stack.startCommand,
+      buildImage: candidate.stack.buildImage,
+      outputDirectory: candidate.stack.outputDirectory,
+      productionPaths: candidate.stack.productionPaths,
+      port: candidate.stack.port,
+    };
+  });
+
+  return {
+    apps,
+    workspace: {
+      packageManager: resolvedPackageManager,
+      installCommand,
+    },
+  };
+}
+
+/**
+ * Stricter than `isNestedProjectCandidate`: monorepo sub-apps must be actual
+ * deployable apps (no `services` projects — those belong to the compose flow,
+ * not the monorepo flow). Library directories under `packages/` are still
+ * filtered out by `scoreCandidate`'s segment penalty; we additionally reject
+ * `unknown` stacks so we don't list every directory containing a manifest.
+ */
+function isMonorepoAppCandidate(candidate: ProjectRootSnapshot): boolean {
+  if (!candidate.rootDirectory) return false;
+  if (candidate.stack.stack === "unknown") return false;
+  if (candidate.stack.projectType !== "app") return false;
+  // Library segments first (packages/, libs/, shared/, …) are not deployable on their own.
+  const firstSegment = candidate.rootDirectory.split("/")[0]?.toLowerCase();
+  if (firstSegment && LIBRARY_ROOT_SEGMENTS.has(firstSegment)) return false;
+  return true;
 }

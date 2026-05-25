@@ -8,6 +8,11 @@ function getSubtitle(
   components: ComponentState[],
 ): string {
   switch (step) {
+    case "capability":
+      // The capability step is rendered by the parent page directly (not
+      // via SetupHeader), but include the case for exhaustiveness so
+      // adding a new step is a compile error here too.
+      return "What does this server run?";
     case "choose":
       return "Choose how you'd like to set up your server";
     case "checking":

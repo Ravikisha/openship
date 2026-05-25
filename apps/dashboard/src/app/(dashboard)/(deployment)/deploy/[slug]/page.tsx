@@ -7,6 +7,7 @@ import BuildSettings from "@/components/import-project/BuildSettings";
 import DockerSettings from "@/components/import-project/DockerSettings";
 import ComposeServices from "@/components/import-project/ComposeServices";
 import EnvironmentVariables from "@/components/import-project/EnvironmentVariables";
+import MonorepoApps from "@/components/import-project/MonorepoApps";
 import Sidebar from "./components/Sidebar";
 import DeployTargetStep, { DeployTargetSummary, useDesktopTargets } from "./components/DeployTargetStep";
 import { decodeSlug } from "@/utils/repoSlug";
@@ -56,7 +57,22 @@ const DeployRepository: React.FC = () => {
     const projectId = searchParams.get("projectId") || undefined;
     const branch = searchParams.get("branch") || undefined;
     const isDesktop = deployMode === "desktop";
-    
+
+    // Decode the slug at render time so the skeleton can name the source
+    // ("Fetching owner/repo from GitHub") on the very first paint, before the
+    // async initialize call resolves.
+    const decodedSource = React.useMemo(() => {
+        const d = slug ? decodeSlug(slug) : null;
+        if (!d) return null;
+        if (d.kind === "local") return { kind: "local" as const, path: d.path };
+        return {
+            kind: "repo" as const,
+            owner: d.owner,
+            repo: d.repo,
+            branch: branch ?? d.branch,
+        };
+    }, [slug, branch]);
+
     const [loading, setLoading] = useState<boolean>(true);
     const [error, setError] = useState<DeployError | null>(null);
     const hasInitialized = useRef<boolean>(false);
@@ -127,7 +143,7 @@ const DeployRepository: React.FC = () => {
     }, [slug, initializeFromRepo, initializeFromLocal, force, projectId, branch]);
 
     if (loading) {
-        return <SkeletonLoader />;
+        return <SkeletonLoader source={decodedSource} />;
     }
 
     if (error) {
@@ -147,7 +163,10 @@ const DeployRepository: React.FC = () => {
     }
 
     const isServiceDeployment = usesServiceDeployment(config);
-    const isSingleAppFlow = config.projectType === "app" || (config.projectType === "services" && !isServiceDeployment);
+    const isMonorepoFlow = config.projectType === "monorepo";
+    const isSingleAppFlow =
+        !isMonorepoFlow &&
+        (config.projectType === "app" || (config.projectType === "services" && !isServiceDeployment));
 
     return (
         <PageContainer>
@@ -198,8 +217,13 @@ const DeployRepository: React.FC = () => {
                                 <ComposeServices />
                             )}
 
-                            {/* Global env vars — service-stack mode owns shared env inside the services card */}
-                            {!isServiceDeployment && (
+                            {/* Monorepo flow: workspace header + per-sub-app cards */}
+                            {isMonorepoFlow && (
+                                <MonorepoApps />
+                            )}
+
+                            {/* Global env vars — service-stack and monorepo own their own env scoping */}
+                            {!isServiceDeployment && !isMonorepoFlow && (
                                 <EnvironmentVariables />
                             )}
                             <ProjectName />

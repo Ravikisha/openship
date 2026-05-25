@@ -352,11 +352,30 @@ export class SshExecutor implements CommandExecutor {
 
     const rsync = await canUseRemoteRsync(deps);
     if (rsync.ok) {
-      await transferRemoteDirectoryWithRsync(localPath, remotePath, deps, onLog, options);
-      return;
+      try {
+        await transferRemoteDirectoryWithRsync(localPath, remotePath, deps, onLog, options);
+        return;
+      } catch (err) {
+        // rsync uses a SEPARATE /usr/bin/ssh subprocess with its own auth
+        // path — when the VPS's pubkey/password state desyncs (perms
+        // changed, fail2ban ban, authorized_keys edited), rsync fails
+        // even though openship's own ssh2 connection still works.
+        //
+        // Fall back to tar-piped-through-pipeLocal, which RIDES the
+        // existing ssh2 connection — same auth as every other openship
+        // command. If steps 1-N succeeded, this will succeed too.
+        const message = err instanceof Error ? err.message : String(err);
+        onLog?.(
+          logEntry(
+            `rsync transfer failed (${message}); falling back to tar stream through the existing SSH connection.`,
+            "warn",
+          ),
+        );
+      }
+    } else {
+      onLog?.(logEntry(`rsync unavailable (${rsync.reason}); falling back to tar stream transfer.`, "warn"));
     }
 
-    onLog?.(logEntry(`rsync unavailable (${rsync.reason}); falling back to tar stream transfer.`, "warn"));
     await transferRemoteDirectoryWithTar(localPath, remotePath, deps, onLog, options);
   }
 }

@@ -7,8 +7,6 @@ import {
   XCircle,
   Loader2,
   Activity,
-  Wifi,
-  WifiOff,
 } from "lucide-react";
 import type { ComponentStatus, ServerStats } from "@/lib/api/system";
 
@@ -30,17 +28,22 @@ function formatUptime(seconds: string): string {
   return `${mins}m`;
 }
 
-function UsageBar({
-  pct,
-  colorClass,
-}: {
-  pct: number;
-  colorClass: string;
-}) {
+/**
+ * Usage bar. Neutral foreground tone by default — amber when the value
+ * climbs past 70%, red past 90%. The colour is a function of the data,
+ * not arbitrary per-metric branding.
+ */
+function UsageBar({ pct }: { pct: number }) {
+  const tone =
+    pct >= 90
+      ? "bg-red-500"
+      : pct >= 70
+        ? "bg-amber-500"
+        : "bg-foreground/60";
   return (
-    <div className="h-2 bg-muted rounded-full overflow-hidden mt-2">
+    <div className="h-1.5 bg-muted rounded-full overflow-hidden mt-3">
       <div
-        className={`h-full rounded-full transition-all duration-700 ease-out ${colorClass}`}
+        className={`h-full rounded-full transition-all duration-700 ease-out ${tone}`}
         style={{ width: `${Math.min(pct, 100)}%` }}
       />
     </div>
@@ -53,32 +56,31 @@ function StatCard({
   value,
   sub,
   pct,
-  iconWrapClass,
-  barClass,
 }: {
   icon: React.ElementType;
   label: string;
   value: string;
   sub?: string;
   pct?: number;
-  iconWrapClass: string;
-  barClass?: string;
 }) {
   return (
     <div className="bg-card rounded-2xl border border-border/50 p-5">
-      <div className="flex items-center gap-3 mb-3">
-        <div className={`w-9 h-9 rounded-xl flex items-center justify-center ${iconWrapClass}`}>
-          <Icon className="size-[18px]" />
-        </div>
-        <span className="text-sm text-muted-foreground">{label}</span>
+      <div className="flex items-center gap-2 mb-3">
+        <Icon
+          className="size-4 text-muted-foreground"
+          strokeWidth={2}
+        />
+        <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+          {label}
+        </span>
       </div>
-      <p className="text-2xl font-semibold text-foreground tracking-tight">
+      <p className="text-2xl font-semibold text-foreground tracking-tight tabular-nums">
         {value}
       </p>
       {sub && (
-        <p className="text-xs text-muted-foreground mt-1">{sub}</p>
+        <p className="text-xs text-muted-foreground mt-1 tabular-nums">{sub}</p>
       )}
-      {pct != null && barClass && <UsageBar pct={pct} colorClass={barClass} />}
+      {pct != null && <UsageBar pct={pct} />}
     </div>
   );
 }
@@ -87,9 +89,6 @@ export function OverviewTab({
   stats,
   components,
   checking,
-  monitorConnected,
-  monitorError,
-  onReconnectMonitor,
 }: {
   stats: ServerStats | null;
   components: ComponentStatus[];
@@ -101,6 +100,7 @@ export function OverviewTab({
   const healthyCount = components.filter((c) => c.healthy).length;
   const totalCount = components.length;
   const allHealthy = totalCount > 0 && healthyCount === totalCount;
+  const unhealthyCount = totalCount - healthyCount;
 
   const memPct =
     stats && stats.memTotal > 0
@@ -113,19 +113,20 @@ export function OverviewTab({
 
   return (
     <div className="space-y-6">
-      {/* Monitor status bar */}
-  
-
-      {/* Stat cards */}
+      {/* Stat cards — neutral icons; the bar tone is the only thing that
+          changes with the data, so resting state is calm and high usage
+          stands out. */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard
           icon={Cpu}
           label="CPU"
           value={stats ? `${stats.cpu}%` : "—"}
-          sub={stats ? `Load ${stats.load1} / ${stats.load5} / ${stats.load15}` : undefined}
+          sub={
+            stats
+              ? `Load ${stats.load1} · ${stats.load5} · ${stats.load15}`
+              : undefined
+          }
           pct={stats?.cpu ?? undefined}
-          iconWrapClass="bg-blue-500/10 text-blue-500"
-          barClass="bg-blue-500"
         />
         <StatCard
           icon={MemoryStick}
@@ -133,12 +134,10 @@ export function OverviewTab({
           value={stats ? `${memPct}%` : "—"}
           sub={
             stats
-              ? `${formatBytes(stats.memUsed)} / ${formatBytes(stats.memTotal)}`
+              ? `${formatBytes(stats.memUsed)} of ${formatBytes(stats.memTotal)}`
               : undefined
           }
           pct={memPct ?? undefined}
-          iconWrapClass="bg-violet-500/10 text-violet-500"
-          barClass="bg-violet-500"
         />
         <StatCard
           icon={HardDrive}
@@ -146,83 +145,91 @@ export function OverviewTab({
           value={stats ? `${diskPct}%` : "—"}
           sub={
             stats
-              ? `${formatBytes(stats.diskUsed)} / ${formatBytes(stats.diskTotal)}`
+              ? `${formatBytes(stats.diskUsed)} of ${formatBytes(stats.diskTotal)}`
               : undefined
           }
           pct={diskPct ?? undefined}
-          iconWrapClass="bg-amber-500/10 text-amber-500"
-          barClass="bg-amber-500"
         />
         <StatCard
           icon={Clock}
           label="Uptime"
           value={stats ? formatUptime(stats.uptime) : "—"}
-          iconWrapClass="bg-emerald-500/10 text-emerald-500"
+          sub={stats ? "since last boot" : undefined}
         />
       </div>
 
-      {/* Components quick health */}
-      <div className="bg-card rounded-2xl border border-border/50">
-        <div className="flex items-center gap-3 px-5 py-4 border-b border-border/50">
-          <div className="w-9 h-9 bg-emerald-500/10 rounded-xl flex items-center justify-center">
-            <Activity className="size-[18px] text-emerald-500" />
-          </div>
-          <div className="flex-1">
-            <h2 className="font-semibold text-foreground text-[15px]">
+      {/* Components — inline-header card pattern matching the rest of
+          the dashboard. No icon-in-emerald-circle; just a small muted
+          icon next to the heading. */}
+      <div className="bg-card rounded-2xl border border-border/50 p-5">
+        <div className="flex items-center justify-between gap-3 mb-4">
+          <div className="flex items-center gap-2 min-w-0">
+            <Activity
+              className="size-4 text-muted-foreground shrink-0"
+              strokeWidth={2}
+            />
+            <h2 className="font-semibold text-foreground text-sm">
               Components
             </h2>
-            <p className="text-xs text-muted-foreground">
-              {checking
-                ? "Checking\u2026"
-                : allHealthy
-                  ? "All systems operational"
-                  : totalCount > 0
-                    ? `${totalCount - healthyCount} issue${totalCount - healthyCount > 1 ? "s" : ""} detected`
-                    : "No data"}
-            </p>
           </div>
+          <span className="text-xs text-muted-foreground tabular-nums shrink-0">
+            {checking
+              ? "Checking…"
+              : allHealthy
+                ? "All systems operational"
+                : totalCount > 0
+                  ? `${unhealthyCount} of ${totalCount} unhealthy`
+                  : "No data"}
+          </span>
         </div>
-        <div className="p-5 space-y-1">
-          {checking && totalCount === 0 ? (
-            <div className="flex items-center justify-center py-6">
-              <Loader2 className="size-5 animate-spin text-muted-foreground" />
-            </div>
-          ) : totalCount > 0 ? (
-            components.map((comp) => (
+
+        {checking && totalCount === 0 ? (
+          <div className="flex items-center justify-center py-8">
+            <Loader2 className="size-4 animate-spin text-muted-foreground" />
+          </div>
+        ) : totalCount > 0 ? (
+          <div className="divide-y divide-border/40 -mx-5">
+            {components.map((comp) => (
               <div
                 key={comp.name}
-                className="flex items-center gap-3 py-2 px-2 rounded-lg"
+                className="flex items-center gap-3 px-5 py-3"
               >
-                <div className="shrink-0">
-                  {comp.healthy ? (
-                    <CheckCircle2 className="size-4 text-emerald-500" />
-                  ) : (
-                    <XCircle className="size-4 text-orange-500" />
-                  )}
-                </div>
-                <span className="text-sm text-foreground flex-1">
+                {comp.healthy ? (
+                  <CheckCircle2
+                    className="size-4 text-emerald-500 shrink-0"
+                    strokeWidth={2}
+                  />
+                ) : (
+                  <XCircle
+                    className="size-4 text-red-500 shrink-0"
+                    strokeWidth={2}
+                  />
+                )}
+                <span className="text-sm text-foreground flex-1 truncate">
                   {comp.label || comp.name}
                 </span>
                 {comp.version && (
-                  <span className="text-xs text-muted-foreground bg-muted/50 px-1.5 py-0.5 rounded">
+                  <span className="text-[11px] font-mono text-muted-foreground bg-muted/60 px-1.5 py-0.5 rounded">
                     v{comp.version}
                   </span>
                 )}
                 <span
                   className={`text-xs font-medium ${
-                    comp.healthy ? "text-emerald-500" : "text-orange-500"
+                    comp.healthy
+                      ? "text-emerald-600 dark:text-emerald-400"
+                      : "text-red-600 dark:text-red-400"
                   }`}
                 >
                   {comp.healthy ? "Healthy" : "Unhealthy"}
                 </span>
               </div>
-            ))
-          ) : (
-            <p className="text-sm text-muted-foreground text-center py-6">
-              No health data yet
-            </p>
-          )}
-        </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-sm text-muted-foreground text-center py-6">
+            No health data yet
+          </p>
+        )}
       </div>
     </div>
   );

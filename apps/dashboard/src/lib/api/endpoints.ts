@@ -172,8 +172,31 @@ export const endpoints = {
     status: "mail/status",
     setup: "mail/setup",
     cancelSetup: "mail/setup/cancel",
+    acknowledgeDns: "mail/setup/dns-ack",
+    acknowledgePtr: "mail/setup/ptr-ack",
+    resetSetup: "mail/setup/reset",
+    setPostmasterPassword: "mail/credentials/postmaster",
+    health: (serverId: string) => `mail/health/${encodeURIComponent(serverId)}`,
     portsCheck: "mail/ports/check",
     portsResolve: "mail/ports/resolve",
+    admin: {
+      domains: (serverId: string) =>
+        `mail/admin/${encodeURIComponent(serverId)}/domains`,
+      domain: (serverId: string, domain: string) =>
+        `mail/admin/${encodeURIComponent(serverId)}/domains/${encodeURIComponent(domain)}`,
+      domainDependents: (serverId: string, domain: string) =>
+        `mail/admin/${encodeURIComponent(serverId)}/domains/${encodeURIComponent(domain)}/dependents`,
+      mailboxes: (serverId: string) =>
+        `mail/admin/${encodeURIComponent(serverId)}/mailboxes`,
+      mailbox: (serverId: string, email: string) =>
+        `mail/admin/${encodeURIComponent(serverId)}/mailboxes/${encodeURIComponent(email)}`,
+      stats: (serverId: string) =>
+        `mail/admin/${encodeURIComponent(serverId)}/stats`,
+      dnsScan: (serverId: string) =>
+        `mail/admin/${encodeURIComponent(serverId)}/dns-scan`,
+    },
+    branding: (serverId: string) =>
+      `mail/branding/${encodeURIComponent(serverId)}`,
   },
 
   /* ---------------------------------------------------------------- */

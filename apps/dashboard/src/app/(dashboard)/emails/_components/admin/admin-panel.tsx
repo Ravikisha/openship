@@ -1,0 +1,188 @@
+"use client";
+
+/**
+ * Top-level mail admin panel — shown on /emails once the server is fully
+ * provisioned. Tab state lives in the URL so refreshes and back/forward
+ * navigation preserve context.
+ *
+ * Tab bar: chunky horizontal nav with icon-above-label. Each tab gets a
+ * proper hit area + clear active state so the admin reads as a flagship
+ * surface, not a settings page. Built on a sticky <nav> with a single
+ * bottom border, like Vercel's project header tabs.
+ *
+ * Tabs:
+ *   - Overview:   credentials + setup-guide banners + webmail.
+ *   - Domains:    vmail.domain CRUD.
+ *   - Mailboxes:  vmail.mailbox CRUD per domain.
+ *   - DNS:        reference of DNS records.
+ *   - Components: live daemon health (separated from Overview by request).
+ *   - Advanced:   destructive / power-user actions.
+ */
+
+import { useCallback, useMemo } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import {
+  LayoutDashboard,
+  Globe,
+  UserRound,
+  FileText,
+  HeartPulse,
+  Palette,
+  Settings,
+  type LucideIcon,
+} from "lucide-react";
+import type { MailSetupStatus } from "@/lib/api";
+import { cn } from "@/lib/utils";
+import { OverviewTab } from "./overview-tab";
+import { DomainsTab } from "./domains-tab";
+import { MailboxesTab } from "./mailboxes-tab";
+import { DnsTab } from "./dns-tab";
+import { HealthTab } from "./health-tab";
+import { BrandingTab } from "./branding-tab";
+import { AdvancedTab } from "./advanced-tab";
+
+interface MailAdminPanelProps {
+  status: MailSetupStatus;
+  serverId: string;
+  onRefresh: () => void;
+}
+
+type TabKey =
+  | "overview"
+  | "domains"
+  | "mailboxes"
+  | "dns"
+  | "health"
+  | "branding"
+  | "advanced";
+
+interface TabDef {
+  key: TabKey;
+  label: string;
+  icon: LucideIcon;
+}
+
+const TABS: TabDef[] = [
+  { key: "overview", label: "Overview", icon: LayoutDashboard },
+  { key: "domains", label: "Domains", icon: Globe },
+  { key: "mailboxes", label: "Mailboxes", icon: UserRound },
+  { key: "dns", label: "DNS", icon: FileText },
+  { key: "health", label: "Health", icon: HeartPulse },
+  { key: "branding", label: "Branding", icon: Palette },
+  { key: "advanced", label: "Advanced", icon: Settings },
+];
+
+const VALID_TABS: TabKey[] = TABS.map((t) => t.key);
+
+export function MailAdminPanel({ status, serverId, onRefresh }: MailAdminPanelProps) {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const primaryDomain = status.domain ?? "";
+
+  const tab = useMemo<TabKey>(() => {
+    const raw = searchParams.get("tab") as TabKey | null;
+    if (raw && VALID_TABS.includes(raw)) return raw;
+    return "overview";
+  }, [searchParams]);
+
+  const selectedDomain = searchParams.get("domain") || primaryDomain;
+
+  const setQuery = useCallback(
+    (patch: { tab?: TabKey; domain?: string | null }) => {
+      const next = new URLSearchParams(searchParams.toString());
+      if (patch.tab !== undefined) next.set("tab", patch.tab);
+      if (patch.domain !== undefined) {
+        if (patch.domain) next.set("domain", patch.domain);
+        else next.delete("domain");
+      }
+      router.replace(`?${next.toString()}`, { scroll: false });
+    },
+    [router, searchParams],
+  );
+
+  return (
+    <div className="space-y-6">
+      <TabBar
+        tabs={TABS}
+        active={tab}
+        onChange={(k) => setQuery({ tab: k })}
+      />
+
+      <div>
+        {tab === "overview" && (
+          <OverviewTab status={status} serverId={serverId} onRefresh={onRefresh} />
+        )}
+        {tab === "domains" && (
+          <DomainsTab serverId={serverId} primaryDomain={primaryDomain} />
+        )}
+        {tab === "mailboxes" && (
+          <MailboxesTab
+            serverId={serverId}
+            primaryDomain={primaryDomain}
+            selectedDomain={selectedDomain}
+            onSelectDomain={(d) => setQuery({ domain: d })}
+          />
+        )}
+        {tab === "dns" && <DnsTab status={status} />}
+        {tab === "health" && <HealthTab serverId={serverId} />}
+        {tab === "branding" && <BrandingTab serverId={serverId} />}
+        {tab === "advanced" && (
+          <AdvancedTab
+            status={status}
+            serverId={serverId}
+            onChanged={onRefresh}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Tab bar ─────────────────────────────────────────────────────────────────
+
+/**
+ * Tab bar — matches the pattern used on the server-detail page
+ * (servers/[serverId]/page.tsx): horizontal flex with icon-left-of-label,
+ * thin bottom-border on the bar, primary-coloured underline indicator
+ * sitting under the active tab. Scrolls horizontally on narrow screens.
+ */
+function TabBar({
+  tabs,
+  active,
+  onChange,
+}: {
+  tabs: TabDef[];
+  active: TabKey;
+  onChange: (key: TabKey) => void;
+}) {
+  return (
+    <nav
+      className="flex items-center gap-1 border-b border-border/50 overflow-x-auto"
+      aria-label="Mail admin sections"
+    >
+      {tabs.map((t) => {
+        const Icon = t.icon;
+        const isActive = active === t.key;
+        return (
+          <button
+            key={t.key}
+            onClick={() => onChange(t.key)}
+            aria-current={isActive ? "page" : undefined}
+            className={cn(
+              "inline-flex items-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors relative whitespace-nowrap",
+              isActive
+                ? "text-foreground"
+                : "text-muted-foreground hover:text-foreground/70",
+            )}
+          >
+            <Icon className="size-4" strokeWidth={2} />
+            {t.label}
+            {isActive && (
+              <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary rounded-full" />
+            )}
+          </button>
+        );
+      })}
+    </nav>
+  );
+}

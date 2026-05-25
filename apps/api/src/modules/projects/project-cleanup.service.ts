@@ -292,8 +292,18 @@ export async function deleteProject(
     ? (await repos.project.listByApp(p.appId)).filter((row) => row.userId === userId)
     : [p];
 
-  // 1. Soft-delete immediately — environments disappear from listings
+  // 1. Collect resource manifests BEFORE we tear down DB state — the manifest
+  //    needs to inspect domain/deployment rows that the next step removes.
+  const manifests = await Promise.all(
+    projects.map(async (project) => ({ project, manifest: await collectProjectManifest(project) })),
+  );
+
+  // 2. Soft-delete environments immediately, and hard-delete domain rows so
+  //    the managed-slug "registry" is freed right away. Without this, an
+  //    immediate redeploy hits an orphan row and falsely reports the slug
+  //    as taken before the async cleanup below has a chance to run.
   await Promise.all(projects.map((project) => repos.project.softDelete(project.id)));
+  await Promise.all(projects.map((project) => repos.domain.deleteByProjectId(project.id)));
 
   let deletedApp = deleteApp;
   if (deleteApp) {
@@ -306,9 +316,9 @@ export async function deleteProject(
     }
   }
 
-  // 2. Background cleanup (fire-and-forget)
-  for (const project of projects) {
-    cleanupProjectResources(project, project.id).catch((err) =>
+  // 3. Background cleanup (fire-and-forget) using the manifests we captured.
+  for (const { project, manifest } of manifests) {
+    cleanupProjectResources(manifest, project.id).catch((err) =>
       console.error(`[PROJECT] Background cleanup failed for ${project.id}:`, err),
     );
   }
@@ -318,13 +328,12 @@ export async function deleteProject(
 
 /** Internal: runs after soft-delete, outside the request lifecycle. */
 async function cleanupProjectResources(
-  p: NonNullable<Awaited<ReturnType<typeof repos.project.findById>>>,
+  manifest: CleanupManifest,
   projectId: string,
 ): Promise<void> {
-  // 1. Collect all resources
-  const manifest = await collectProjectManifest(p);
-
-  // 2. Destroy resources with bounded concurrency
+  // 1. Destroy resources with bounded concurrency (containers, images, routes).
+  //    On cloud, destroying the workspace also frees the Oblien-side route;
+  //    on self-hosted, removeRoute clears the local nginx config.
   const result = await executeCleanup(manifest);
   if (result.failed.length > 0) {
     console.error(
@@ -334,6 +343,6 @@ async function cleanupProjectResources(
     );
   }
 
-  // 3. DB cleanup (hard-delete deployments + build sessions)
+  // 2. DB cleanup (hard-delete deployments + build sessions).
   await repos.deployment.deleteByProjectId(projectId);
 }

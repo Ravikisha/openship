@@ -35,6 +35,7 @@ import {
   type SshConfig,
 } from "@repo/adapters";
 import { formatDuration, systemDebug } from "@/lib/system-debug";
+import { decryptSecretField } from "@/lib/credential-encryption";
 
 // ─── Shared SSH config builder ───────────────────────────────────────────────
 
@@ -67,7 +68,10 @@ export async function buildSshConfig(
   };
 
   if (settings.sshAuthMethod === "password" && settings.sshPassword) {
-    config.password = settings.sshPassword;
+    // Stored encrypted on insert; decrypted only here at the moment we
+    // hand it to the ssh2 client. Backwards-compatible: tolerates plaintext
+    // legacy rows so existing installs keep working through one restart.
+    config.password = decryptSecretField(settings.sshPassword);
   } else if (settings.sshAuthMethod === "key" && settings.sshKeyPath) {
     const keyPath = settings.sshKeyPath.trim();
     // Reject path traversal — must be absolute with no ".." segments
@@ -79,7 +83,7 @@ export async function buildSshConfig(
       return null;
     }
     if (settings.sshKeyPassphrase) {
-      config.privateKeyPassphrase = settings.sshKeyPassphrase;
+      config.privateKeyPassphrase = decryptSecretField(settings.sshKeyPassphrase);
     }
   } else {
     return null;
