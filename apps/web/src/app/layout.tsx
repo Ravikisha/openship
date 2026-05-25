@@ -38,7 +38,7 @@ export const metadata: Metadata = {
   openGraph: {
     type: "website",
     locale: "en_US",
-    url: "https://openship.dev",
+    url: "https://openship.io",
     siteName: "Openship",
     title: "Openship — Open Source, Self-Hostable Deployment Platform",
     description:

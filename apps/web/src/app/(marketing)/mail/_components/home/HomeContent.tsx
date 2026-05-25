@@ -103,7 +103,7 @@ export default function HomeContent() {
           className="border-input/50 mb-6 inline-flex items-center gap-2 rounded-full border border-[#2A2A2A] bg-[#1E1E1E] px-4 py-1"
         >
           <Link
-            href="https://github.com/openshiporg/openship"
+            href="https://github.com/oblien/openship"
             target="_blank"
             className="flex items-center gap-2 text-sm"
           >

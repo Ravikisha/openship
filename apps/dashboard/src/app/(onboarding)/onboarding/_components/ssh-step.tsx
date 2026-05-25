@@ -269,7 +269,7 @@ export function SshStep({ state, onUpdate, onNext, onBack }: StepProps) {
 
         <a
           className="ob-tutorial-link"
-          href="https://docs.openship.dev/self-hosting"
+          href="https://docs.openship.io/self-hosting"
           target="_blank"
           rel="noopener noreferrer"
         >

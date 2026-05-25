@@ -9,7 +9,7 @@ export default function robots(): MetadataRoute.Robots {
         disallow: ["/api/", "/login/", "/dashboard/"],
       },
     ],
-    sitemap: "https://openship.dev/sitemap.xml",
-    host: "https://openship.dev",
+    sitemap: "https://openship.io/sitemap.xml",
+    host: "https://openship.io",
   };
 }

@@ -1,4 +1,4 @@
-import { docs, blog } from "@/.source/server";
+import { docs, resources } from "@/.source/server";
 import { loader } from "fumadocs-core/source";
 
 export const docsSource = loader({
@@ -6,7 +6,17 @@ export const docsSource = loader({
   source: docs.toFumadocsSource(),
 });
 
-export const blogSource = loader({
-  baseUrl: "/blog",
-  source: blog.toFumadocsSource(),
+export const resourcesSource = loader({
+  baseUrl: "/resources",
+  source: resources.toFumadocsSource(),
 });
+
+export interface ResourceFrontmatter {
+  title: string;
+  description?: string;
+  date?: string;
+  category?: string;
+  author?: string;
+  body: React.ComponentType;
+  _exports?: { raw?: string };
+}

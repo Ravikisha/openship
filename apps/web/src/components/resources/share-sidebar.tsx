@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 
-export default function BlogShareSidebar() {
+export default function ResourceShareSidebar() {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = async () => {
@@ -24,10 +24,10 @@ export default function BlogShareSidebar() {
   };
 
   return (
-    <div className="bp-share">
+    <div className="rp-share">
       {/* X / Twitter */}
       <button
-        className="bp-share-btn"
+        className="rp-share-btn"
         onClick={() => share("twitter")}
         aria-label="Share on X"
         title="Share on X"
@@ -39,7 +39,7 @@ export default function BlogShareSidebar() {
 
       {/* LinkedIn */}
       <button
-        className="bp-share-btn"
+        className="rp-share-btn"
         onClick={() => share("linkedin")}
         aria-label="Share on LinkedIn"
         title="Share on LinkedIn"
@@ -51,7 +51,7 @@ export default function BlogShareSidebar() {
 
       {/* Copy link */}
       <button
-        className="bp-share-btn"
+        className="rp-share-btn"
         onClick={handleCopy}
         aria-label={copied ? "Copied!" : "Copy link"}
         title={copied ? "Copied!" : "Copy link"}

@@ -69,7 +69,7 @@ const TIERS = [
     period: "",
     description: "Dedicated infrastructure, compliance, and SLA guarantees.",
     cta: "Contact Sales",
-    ctaHref: "mailto:sales@openship.dev",
+    ctaHref: "mailto:sales@openship.io",
     ctaStyle: "ghost" as const,
     featured: false,
     features: [

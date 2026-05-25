@@ -30,30 +30,28 @@ interface WriterSidebarProps {
   authorName?: string;
 }
 
-export default function BlogWriterSidebar({ authorName }: WriterSidebarProps) {
+export default function ResourceWriterSidebar({ authorName }: WriterSidebarProps) {
   const author = getAuthor(authorName);
 
   return (
-    <aside className="bp-writer">
-      {/* Avatar initial */}
-      <div className="bp-writer-avatar">{author.name[0].toUpperCase()}</div>
+    <aside className="rp-writer">
+      <div className="rp-writer-avatar" aria-hidden="true">
+        {author.name[0].toUpperCase()}
+      </div>
 
-      {/* Name & role */}
-      <div className="bp-writer-name">{author.name}</div>
-      <div className="bp-writer-role">{author.role}</div>
+      <div className="rp-writer-name">{author.name}</div>
+      <div className="rp-writer-role">{author.role}</div>
 
-      {/* Bio */}
-      <p className="bp-writer-bio">{author.bio}</p>
+      <p className="rp-writer-bio">{author.bio}</p>
 
-      {/* Social links */}
       {(author.twitter || author.github) && (
-        <div className="bp-writer-links">
+        <div className="rp-writer-links">
           {author.twitter && (
             <a
               href={`https://x.com/${author.twitter}`}
               target="_blank"
               rel="noopener noreferrer"
-              className="bp-writer-link"
+              className="rp-writer-link"
               aria-label={`${author.name} on X`}
             >
               <svg width="14" height="14" fill="currentColor" viewBox="0 0 24 24">
@@ -66,7 +64,7 @@ export default function BlogWriterSidebar({ authorName }: WriterSidebarProps) {
               href={`https://github.com/${author.github}`}
               target="_blank"
               rel="noopener noreferrer"
-              className="bp-writer-link"
+              className="rp-writer-link"
               aria-label={`${author.name} on GitHub`}
             >
               <svg width="14" height="14" fill="currentColor" viewBox="0 0 24 24">

@@ -14,7 +14,7 @@ const footerLinks = {
     { label: "Self-Hosting Guide", href: "/docs/self-hosting" },
   ],
   Company: [
-    { label: "Blog", href: "/blog" },
+    { label: "Resources", href: "/resources" },
     { label: "About", href: "/about" },
     { label: "Contact", href: "/contact" },
     { label: "Brand", href: "/brand" },

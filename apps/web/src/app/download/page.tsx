@@ -134,11 +134,11 @@ export default function DownloadPage() {
               Docs
             </Link>
             <Link
-              href="/blog"
+              href="/resources"
               className="text-[14px] font-medium transition-colors"
               style={{ color: "var(--th-text-secondary)" }}
             >
-              Blog
+              Resources
             </Link>
             <a
               href="https://github.com/oblien/openship"

@@ -877,11 +877,11 @@
   width: 88px;
   height: 88px;
   margin-top: 18px;
-  color: rgba(255,255,255,.22);
+  color: rgba(255,255,255,.28);
   transition: color .35s ease;
 }
 .cp-group-rail:hover .cp-group-mark {
-  color: rgba(255,255,255,.55);
+  color: rgba(255,255,255,.65);
 }
 
 /* Counter below the mark — "6 capabilities" */
@@ -916,20 +916,34 @@
 .cp-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
-  column-gap: 40px;
-  row-gap: 28px;
+  column-gap: 16px;
+  row-gap: 16px;
 }
 @media (max-width: 600px) {
   .cp-grid { grid-template-columns: 1fr; }
 }
 .cp-item {
   position: relative;
-  padding: 16px 0 0;
-  border-top: 1px solid rgba(255,255,255,.08);
-  transition: border-color .25s ease;
+  padding: 22px 24px;
+  background: rgba(255,255,255,.05);
+  border-radius: 18px;
+  transition: background .25s ease;
 }
-.cp-item:hover { border-top-color: rgba(255,255,255,.22); }
+.cp-item:hover { background: rgba(255,255,255,.075); }
 
+.cp-item-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.cp-item-icon {
+  width: 17px;
+  height: 17px;
+  flex-shrink: 0;
+  color: rgba(255,255,255,.55);
+  transition: color .25s ease;
+}
+.cp-item:hover .cp-item-icon { color: rgba(255,255,255,.95); }
 .cp-item-name {
   font-size: 15.5px;
   font-weight: 600;
@@ -938,7 +952,7 @@
   transition: color .25s ease;
 }
 .cp-item-desc {
-  margin-top: 8px;
+  margin-top: 10px;
   font-size: 14px;
   line-height: 1.6;
   color: rgba(255,255,255,.5);
@@ -1240,15 +1254,15 @@
   position: absolute;
   top: 0;
   bottom: 0;
-  left: calc(((100% - 1px) / 4.8) * 1.8);
-  width: calc(((100% - 1px) / 4.8) * 1);
+  left: calc(((100% - 1px) / 4.7) * 1.2);
+  width: calc(((100% - 1px) / 4.7) * 1.5);
   background: linear-gradient(180deg, rgba(0,0,0,.04) 0%, rgba(0,0,0,.02) 100%);
   pointer-events: none;
   z-index: 0;
 }
 .cmp-row {
   display: grid;
-  grid-template-columns: 1.8fr 1fr 1fr 1fr;
+  grid-template-columns: 1.2fr 1.5fr 1fr 1fr;
   position: relative;
   z-index: 1;
 }

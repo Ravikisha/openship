@@ -64,7 +64,7 @@ function OnboardingInner() {
           <span className="ob-logo-text">Openship</span>
         </div>
         <div className="ob-top-bar-links">
-          <a className="ob-top-bar-link" href="https://openship.dev" target="_blank" rel="noopener noreferrer" title="Website">
+          <a className="ob-top-bar-link" href="https://openship.io" target="_blank" rel="noopener noreferrer" title="Website">
             <GlobeIcon />
           </a>
           <a className="ob-top-bar-link" href="https://github.com/oblien/openship" target="_blank" rel="noopener noreferrer" title="GitHub">

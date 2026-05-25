@@ -38,8 +38,8 @@ export default function Layout({ children }: { children: ReactNode }) {
         }}
         links={[
           {
-            text: "Blog",
-            url: "/blog",
+            text: "Resources",
+            url: "/resources",
           },
           {
             type: "icon",

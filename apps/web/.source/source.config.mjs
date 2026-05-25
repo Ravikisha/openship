@@ -2,8 +2,8 @@
 import { defineDocs, defineConfig, frontmatterSchema } from "fumadocs-mdx/config";
 import { z } from "zod";
 var docs = defineDocs({ dir: "content/docs" });
-var blog = defineDocs({
-  dir: "content/blog",
+var resources = defineDocs({
+  dir: "content/resources",
   docs: {
     schema: frontmatterSchema.extend({
       date: z.string().optional(),
@@ -14,7 +14,7 @@ var blog = defineDocs({
 });
 var source_config_default = defineConfig();
 export {
-  blog,
   source_config_default as default,
-  docs
+  docs,
+  resources
 };

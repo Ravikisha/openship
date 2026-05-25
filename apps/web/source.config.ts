@@ -3,8 +3,8 @@ import { z } from "zod";
 
 export const docs = defineDocs({ dir: "content/docs" });
 
-export const blog = defineDocs({
-  dir: "content/blog",
+export const resources = defineDocs({
+  dir: "content/resources",
   docs: {
     schema: frontmatterSchema.extend({
       date: z.string().optional(),

@@ -78,7 +78,7 @@ const envSchema = z.object({
   SMTP_PORT: z.coerce.number().optional(),
   SMTP_USER: z.string().optional(),
   SMTP_PASS: z.string().optional(),
-  SMTP_FROM: z.string().default("Openship <noreply@openship.dev>"),
+  SMTP_FROM: z.string().default("Openship <noreply@openship.io>"),
 
   /* ---------- Network (self-hosted) ---------- */
   /** Public IP of the server — used for A record instructions in self-hosted mode. */
