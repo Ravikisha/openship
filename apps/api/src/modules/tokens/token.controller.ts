@@ -158,11 +158,28 @@ export async function authorizeMcpClient(c: Context) {
   const body = await c.req.json<{
     clientId?: string;
     readOnly?: boolean;
+    organizationId?: string;
     grants?: Array<{ resourceType: string; resourceId: string; permissions: Permission[] }>;
   }>();
 
   const clientId = body.clientId?.trim();
   if (!clientId) return c.json({ error: "clientId required", code: "CLIENT_ID_REQUIRED" }, 400);
+
+  // The org the client is confined to. The consent page switches the session's
+  // active org to the picked one before calling, so ctx.organizationId is
+  // normally already it; the explicit id is defense-in-depth. Any org other
+  // than the active one must be re-verified as a real membership so a caller
+  // can't bind a token to an org they don't belong to.
+  const organizationId = body.organizationId?.trim() || ctx.organizationId;
+  if (organizationId !== ctx.organizationId) {
+    const membership = await repos.member.find(organizationId, ctx.userId);
+    if (!membership) {
+      return c.json(
+        { error: "You are not a member of that organization", code: "ORG_NOT_A_MEMBER" },
+        403,
+      );
+    }
+  }
 
   const grants = (body.grants ?? []).filter((g) => g.permissions.length > 0);
   const scoped = grants.length > 0;
@@ -187,7 +204,7 @@ export async function authorizeMcpClient(c: Context) {
 
   const binding = await repos.personalAccessToken.upsertOAuthBinding({
     userId: ctx.userId,
-    organizationId: ctx.organizationId,
+    organizationId,
     oauthClientId: clientId,
     readOnly: body.readOnly ?? false,
     scoped,

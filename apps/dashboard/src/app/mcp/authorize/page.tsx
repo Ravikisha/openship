@@ -17,15 +17,34 @@
  * comes from the `useDeploymentInfo` hook instead of `usePlatform`.
  */
 
-import { Suspense, useCallback, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Loader2, Boxes, AlertCircle, Lock } from "lucide-react";
+import { Loader2, Boxes, AlertCircle, Lock, Building2 } from "lucide-react";
 import { authClient, useSession } from "@/lib/auth-client";
 import { AuthShell } from "@/components/auth-shell";
 import { Button } from "@/components/ui/button";
 import { ResourcePicker } from "@/components/permissions/ResourcePicker";
 import { tokensApi, type PickerGrant, type ResourceType } from "@/lib/api";
+import { setActiveOrganizationId } from "@/lib/api/client";
 import { useDeploymentInfo } from "@/hooks/useDeploymentInfo";
+
+interface Org {
+  id: string;
+  name: string;
+}
+
+/**
+ * Better Auth wraps the organization plugin in a Proxy that returns a fresh
+ * reference per access, so capture it once at module scope (see AccountSwitcher
+ * for the full rationale — using it inline as an effect dep loops forever).
+ */
+const orgClient = (authClient as unknown as {
+  organization: {
+    list: () => Promise<{ data?: Org[] }>;
+    setActive: (opts: { organizationId: string }) => Promise<{ error?: { message?: string } | null }>;
+    getFullOrganization: () => Promise<{ data?: { id: string } | null }>;
+  };
+}).organization;
 
 function buildReturnTo(searchParams: URLSearchParams): string {
   const qs = searchParams.toString();
@@ -72,13 +91,60 @@ function McpAuthorizeInner() {
   const [submitting, setSubmitting] = useState<null | "accept" | "deny">(null);
   const [error, setError] = useState<string | null>(null);
 
-  // What this client may do, chosen here and enforced through the same scoped
-  // grant model as a PAT. Read-only blocks writes; picking resources limits the
-  // client to exactly those (leave empty → it acts with your full access).
-  const [readOnly, setReadOnly] = useState(true);
+  const [readOnly, setReadOnly] = useState(false);
   const [grants, setGrants] = useState<PickerGrant[]>([]);
 
   const selfHosted = useDeploymentInfo()?.selfHosted ?? true;
+
+  // The org the client will be confined to. Defaults to the active org; a
+  // multi-org user can pick another. Changing it SWITCHES the session's active
+  // org (like the account switcher) so the resource picker + grant validation
+  // scope to the same org the token binds to — otherwise you'd scope one org's
+  // resources into another org's binding.
+  const [orgs, setOrgs] = useState<Org[]>([]);
+  const [orgId, setOrgId] = useState<string | null>(null);
+  const [orgSwitching, setOrgSwitching] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([
+      orgClient.list().catch(() => ({ data: [] as Org[] })),
+      orgClient.getFullOrganization().catch(() => ({ data: null })),
+    ]).then(([listRes, activeRes]) => {
+      if (cancelled) return;
+      const list = listRes.data ?? [];
+      setOrgs(list);
+      setOrgId((activeRes.data as { id: string } | null)?.id ?? list[0]?.id ?? null);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleOrgChange = useCallback(async (next: string) => {
+    setOrgSwitching(true);
+    setError(null);
+    try {
+      // Switch the session server-side so ctx.organizationId (and thus the
+      // picker's catalog + minterHasAccess) follows. Only commit the local
+      // selection once the switch lands — on failure the picker stays on the
+      // org it's actually scoped to. Grants are cleared: they referenced the
+      // previous org's resource ids.
+      const res = await orgClient.setActive({ organizationId: next });
+      if (res?.error) {
+        setError("Couldn't switch organization. Please try again.");
+        return;
+      }
+      setActiveOrganizationId(next);
+      setGrants([]);
+      setOrgId(next);
+    } catch {
+      setError("Couldn't switch organization. Please try again.");
+    } finally {
+      setOrgSwitching(false);
+    }
+  }, []);
+
+  const busy = submitting !== null || orgSwitching;
 
   const act = useCallback(
     async (accept: boolean) => {
@@ -88,7 +154,12 @@ function McpAuthorizeInner() {
         // Record the client's scope BEFORE issuing a token, so the binding
         // exists when the OAuth token first authenticates. Skip on deny.
         if (accept && clientId) {
-          await tokensApi.mcpAuthorize({ clientId, readOnly, grants });
+          await tokensApi.mcpAuthorize({
+            clientId,
+            readOnly,
+            grants,
+            organizationId: orgId ?? undefined,
+          });
         }
         const redirectURI = await postConsent(accept, consentCode);
         if (redirectURI) {
@@ -106,7 +177,7 @@ function McpAuthorizeInner() {
         setSubmitting(null);
       }
     },
-    [clientId, readOnly, grants, consentCode, router, searchParams],
+    [clientId, readOnly, grants, orgId, consentCode, router, searchParams],
   );
 
   // Not signed in → bounce to login, returning here afterward.
@@ -134,6 +205,7 @@ function McpAuthorizeInner() {
 
   return (
     <div className="space-y-6">
+      {/* Header */}
       <div className="flex items-center gap-3">
         <div className="flex size-11 items-center justify-center rounded-2xl bg-emerald-500/10 text-emerald-500">
           <Boxes className="size-5" />
@@ -146,60 +218,102 @@ function McpAuthorizeInner() {
         </div>
       </div>
 
-      <div className="rounded-xl border border-border/50 bg-muted/20 p-4 text-sm">
-        <p className="text-muted-foreground">
-          Signed in as <span className="font-medium text-foreground">{session?.user?.email}</span>
-        </p>
-        <p className="mt-2 text-muted-foreground">
-          Client <span className="font-mono text-xs text-foreground">{clientId}</span>
-        </p>
-        {scopes.length > 0 && (
-          <div className="mt-3">
-            <p className="text-xs font-medium text-foreground">Requested access</p>
-            <ul className="mt-1 space-y-1">
-              {scopes.map((s) => (
-                <li key={s} className="font-mono text-xs text-muted-foreground">{s}</li>
-              ))}
-            </ul>
+      {/* Body — identity + access level (left) · resource scope (right, wide). */}
+      <div className="grid gap-5 lg:grid-cols-[300px_minmax(0,1fr)] lg:items-start">
+        {/* LEFT — who + how much */}
+        <div className="space-y-4">
+          <div className="rounded-xl border border-border/50 bg-muted/20 p-4 text-sm">
+            <p className="text-muted-foreground">
+              Signed in as{" "}
+              <span className="font-medium text-foreground">{session?.user?.email}</span>
+            </p>
+            <p className="mt-2 break-all text-muted-foreground">
+              Client <span className="font-mono text-xs text-foreground">{clientId}</span>
+            </p>
+            {scopes.length > 0 && (
+              <div className="mt-3">
+                <p className="text-xs font-medium text-foreground">Requested access</p>
+                <ul className="mt-1 space-y-1">
+                  {scopes.map((s) => (
+                    <li key={s} className="font-mono text-xs text-muted-foreground">{s}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </div>
-        )}
-      </div>
 
-      {/* Scope — enforced through the same grant model as a Personal Access
-          Token. Read-only + optional per-resource limits. */}
-      <div className="space-y-3 rounded-xl border border-border/50 p-4">
-        <div>
-          <h2 className="text-sm font-semibold text-foreground">What this client can access</h2>
-          <p className="mt-0.5 text-xs text-muted-foreground">
-            You can only grant access you hold yourself. Leave resources empty to grant your full access.
-          </p>
+          {/* Organization — the token acts ONLY within this org. Switching it
+              changes your active workspace so the scope below matches. */}
+          {orgs.length > 0 && (
+            <div className="rounded-xl border border-border/50 p-4">
+              <div className="flex items-center gap-1.5 text-sm font-medium text-foreground">
+                <Building2 className="size-3.5 text-muted-foreground" />
+                Organization
+              </div>
+              <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                The client can act only within this organization.
+              </p>
+              {orgs.length > 1 ? (
+                <div className="relative mt-2">
+                  <select
+                    value={orgId ?? ""}
+                    onChange={(e) => handleOrgChange(e.target.value)}
+                    disabled={busy}
+                    className="w-full appearance-none rounded-lg border border-border/60 bg-background px-3 py-2 pr-9 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50"
+                  >
+                    {orgs.map((o) => (
+                      <option key={o.id} value={o.id}>{o.name}</option>
+                    ))}
+                  </select>
+                  {orgSwitching && (
+                    <Loader2 className="pointer-events-none absolute right-3 top-1/2 size-4 -translate-y-1/2 animate-spin text-muted-foreground" />
+                  )}
+                </div>
+              ) : (
+                <p className="mt-2 text-sm font-medium text-foreground">{orgs[0]?.name}</p>
+              )}
+            </div>
+          )}
+
+          {/* Access level — full control by default; read-only is opt-in. */}
+          <label className="flex cursor-pointer select-none items-start gap-3 rounded-xl border border-border/50 p-4">
+            <input
+              type="checkbox"
+              checked={readOnly}
+              onChange={(e) => setReadOnly(e.target.checked)}
+              disabled={busy}
+              className="mt-0.5 size-4 rounded border-border/60"
+            />
+            <span className="min-w-0">
+              <span className="flex items-center gap-1.5 text-sm font-medium text-foreground">
+                <Lock className="size-3.5 text-muted-foreground" />
+                Read-only access
+              </span>
+              <span className="mt-1 block text-xs leading-relaxed text-muted-foreground">
+                The client can view but not deploy, change, or delete anything. Leave this off to
+                let it deploy and manage resources.
+              </span>
+            </span>
+          </label>
         </div>
 
-        <label className="flex items-center gap-2 text-sm text-foreground cursor-pointer select-none">
-          <input
-            type="checkbox"
-            checked={readOnly}
-            onChange={(e) => setReadOnly(e.target.checked)}
-            disabled={submitting !== null}
-            className="size-4 rounded border-border/60"
-          />
-          <Lock className="size-3.5 text-muted-foreground" />
-          Read-only (blocks all writes)
-        </label>
-
-        <div className="space-y-2">
-          <p className="text-xs font-medium text-foreground">
-            Limit to specific resources{" "}
-            <span className="font-normal text-muted-foreground">
-              ({grants.length > 0 ? `${grants.length} selected` : "optional"})
-            </span>
-          </p>
+        {/* RIGHT — resource scope (the wide part). Enforced through the same
+            grant model as a PAT. */}
+        <div className="space-y-3 rounded-xl border border-border/50 p-5">
+          <div>
+            <h2 className="text-sm font-semibold text-foreground">What this client can access</h2>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              You can only grant access you hold yourself. Leave everything unselected to grant the
+              client your full access, or pick resources to scope it down.
+            </p>
+          </div>
           <ResourcePicker
+            key={orgId ?? "none"}
             value={grants}
             onChange={setGrants}
             availableTypes={grantableTypes(selfHosted)}
-            defaultPermissions={["read"]}
-            disabled={submitting !== null}
+            defaultPermissions={["read", "write"]}
+            disabled={busy}
           />
         </div>
       </div>
@@ -211,11 +325,12 @@ function McpAuthorizeInner() {
         </div>
       )}
 
-      <div className="flex items-center justify-end gap-2">
-        <Button variant="outline" disabled={submitting !== null} onClick={() => act(false)}>
+      {/* Footer actions */}
+      <div className="flex items-center justify-end gap-2 border-t border-border/50 pt-4">
+        <Button variant="outline" disabled={busy} onClick={() => act(false)}>
           {submitting === "deny" ? <Loader2 className="size-4 animate-spin" /> : "Deny"}
         </Button>
-        <Button disabled={submitting !== null} onClick={() => act(true)}>
+        <Button disabled={busy} onClick={() => act(true)}>
           {submitting === "accept" ? <Loader2 className="size-4 animate-spin" /> : "Authorize"}
         </Button>
       </div>
@@ -225,7 +340,7 @@ function McpAuthorizeInner() {
 
 export default function McpAuthorizePage() {
   return (
-    <AuthShell>
+    <AuthShell maxWidth="max-w-4xl">
       <Suspense
         fallback={
           <div className="flex items-center justify-center py-10 text-muted-foreground">

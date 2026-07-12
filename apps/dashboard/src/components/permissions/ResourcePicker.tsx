@@ -154,6 +154,16 @@ export function ResourcePicker({
 
   const toggleResource = (resourceType: ResourceType, resourceId: string) => {
     const existing = findGrantIn(value, resourceType, resourceId);
+    // Turning ON the "All X" wildcard supersedes every specific grant of this
+    // type — same rule as the GitHub whole-org checkbox. The specific rows then
+    // render disabled ("covered by All X") so the selection stays coherent.
+    if (resourceId === "*" && !existing) {
+      onChange([
+        ...value.filter((g) => g.resourceType !== resourceType),
+        { resourceType, resourceId: "*", permissions: defaultPermissions },
+      ]);
+      return;
+    }
     onChange(writeGrant(value, resourceType, resourceId, existing ? [] : defaultPermissions));
   };
 
@@ -170,6 +180,11 @@ export function ResourcePicker({
     const q = search.trim().toLowerCase();
     return catalog.filter((c) => c.label.toLowerCase().includes(q));
   }, [catalog, search]);
+
+  // When the "All X" wildcard is selected, the specific rows are covered by it —
+  // render them disabled so the user can't pick a redundant subset.
+  const wildcardActive =
+    !isGithub && !isSingleton && !!findGrantIn(value, activeTab as ResourceType, "*");
 
   const countForTab = (tab: TabId) =>
     tab === "github"
@@ -274,7 +289,8 @@ export function ResourcePicker({
                       grant={findGrantIn(value, activeTab as ResourceType, entry.id)}
                       onToggleResource={toggleResource}
                       onTogglePermission={togglePermission}
-                      disabled={disabled}
+                      disabled={disabled || wildcardActive}
+                      covered={wildcardActive}
                     />
                   ))
                 )}
@@ -339,6 +355,7 @@ function ResourceRow({
   onToggleResource,
   onTogglePermission,
   disabled,
+  covered,
 }: {
   resourceType: ResourceType;
   resourceId: string;
@@ -348,12 +365,19 @@ function ResourceRow({
   onToggleResource: (rt: ResourceType, rid: string) => void;
   onTogglePermission: (rt: ResourceType, rid: string, p: Permission) => void;
   disabled?: boolean;
+  /** True when an "All X" wildcard is selected — this specific row is redundant
+   *  and shown dimmed + non-interactive. */
+  covered?: boolean;
 }) {
   const checked = !!grant;
   const isWildcard = resourceId === "*";
 
   return (
-    <div className={`px-4 py-3 ${checked ? "bg-primary/5" : "hover:bg-muted/20"} transition-colors`}>
+    <div
+      className={`px-4 py-3 transition-colors ${
+        checked ? "bg-primary/5" : covered ? "opacity-50" : "hover:bg-muted/20"
+      }`}
+    >
       <div className="flex items-center gap-3">
         <Checkbox checked={checked} disabled={disabled} onClick={() => onToggleResource(resourceType, resourceId)} />
         <div className="flex-1 min-w-0">
@@ -362,6 +386,11 @@ function ResourceRow({
             {isWildcard && (
               <span className="ml-2 text-[10px] font-medium uppercase tracking-wider text-primary">
                 wildcard
+              </span>
+            )}
+            {covered && !isWildcard && (
+              <span className="ml-2 text-[10px] font-medium normal-case tracking-normal text-muted-foreground">
+                covered by all
               </span>
             )}
           </p>
@@ -375,7 +404,7 @@ function ResourceRow({
           )}
         </div>
       </div>
-      {checked && (
+      {checked && !covered && (
         <PermissionChips
           perms={grant?.permissions ?? []}
           onToggle={(p) => onTogglePermission(resourceType, resourceId, p)}
