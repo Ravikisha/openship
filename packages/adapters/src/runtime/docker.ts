@@ -578,10 +578,16 @@ export class DockerRuntime implements RuntimeAdapter {
     // Wipe stale dir from a previous failed deploy, if any. -rf is safe - the
     // path is namespaced and only ever holds the context we just transferred.
     await executor.exec(`rm -rf ${sq(remoteContextDir)} && mkdir -p ${sq(remoteContextDir)}`);
+    // `contextDir` is ALREADY the final build context (prepareSourceTree applied
+    // git-truth / cloned the tracked set and stripped `.git`). Transfer it
+    // VERBATIM — pass `excludes: []` so the transfer doesn't re-apply the
+    // name-based default and delete tracked source (e.g. an `app/.../build`
+    // route) that the prepare step deliberately kept.
     await transferLocalDirectory(
       contextDir,
       { kind: "executor", executor, path: remoteContextDir },
       log,
+      { excludes: [] },
     );
   }
 
