@@ -77,6 +77,12 @@ services:
       PORT: "4000"
       DATABASE_URL: postgresql://${POSTGRES_USER:-openship}:${POSTGRES_PASSWORD:-openship}@postgres:5432/${POSTGRES_DB:-openship}
       REDIS_URL: redis://redis:6379
+      # External edge: Caddy already owns ingress + TLS (self-hosted behind
+      # Caddy). OpenShip must NOT install OpenResty/certbot — routing/SSL are
+      # handled by Caddy; deployed containers are published via openship-caddy-sync
+      # from the openship.project label. Fixes the Debian-trixie OpenResty 404
+      # that blocked every avatar-tutor deploy.
+      OPENSHIP_EXTERNAL_EDGE: "true"
     # Mount host gh config so the dashboard's "Check connection" (and local
     # gh CLI auth) can read ~/.config/gh/hosts.yml inside the container.
     volumes:
